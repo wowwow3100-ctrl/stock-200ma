@@ -6,10 +6,9 @@ import time
 from datetime import datetime
 import plotly.graph_objects as go
 import requests
-from streamlit_lottie import st_lottie
 
 # --- 1. 網頁設定 ---
-VER = "ver2.0"
+VER = "ver2.1"
 st.set_page_config(page_title=f"旺來戰法過濾器({VER})", layout="wide")
 
 # --- 2. 核心功能區 ---
@@ -33,17 +32,6 @@ def get_stock_list():
                 stock_dict[f"{code}.TWO"] = {'name': info.name, 'code': code, 'group': info.group}
             
     return stock_dict
-
-def load_lottie_retry(url_list):
-    """嘗試讀取多個動畫網址，直到成功為止"""
-    for url in url_list:
-        try:
-            r = requests.get(url, timeout=3)
-            if r.status_code == 200:
-                return r.json()
-        except:
-            continue
-    return None
 
 def calculate_kd_values(df, n=9):
     try:
@@ -186,33 +174,24 @@ if 'last_update' not in st.session_state:
 with st.sidebar:
     st.header("1. 資料庫管理")
     
-    # --- 動畫設定：開寶箱 (Loading) ---
-    # 設定多個備用網址，確保一定讀得到
-    chest_urls = [
-        "https://lottie.host/9c336184-4869-42b7-a35b-17983949ce28/U2d2O8h0bI.json", # 首選
-        "https://assets10.lottiefiles.com/packages/lf20_7i3wdaug.json",             # 備用1
-        "https://assets2.lottiefiles.com/packages/lf20_hojiniga.json"               # 備用2
-    ]
+    # --- 修改 1: 改用絕對穩定的 GIF 動畫 ---
+    # 這是開寶箱的 GIF
+    chest_gif_url = "https://cdn.pixabay.com/animation/2022/10/26/15/45/treasure-chest-7548761_512.gif"
     
     if st.button("🔄 更新股價資料 (開市請按我)", type="primary"):
         stock_dict = get_stock_list()
         
-        # 嘗試讀取開寶箱動畫
-        lottie_json = load_lottie_retry(chest_urls)
-        
-        placeholder_lottie = st.empty() 
-        with placeholder_lottie:
-            if lottie_json:
-                st_lottie(lottie_json, height=200, key="loading_chest")
-            else:
-                st.info("🤖 阿吉正在挖寶中 (文字模式)...")
+        # 顯示下載中 GIF
+        placeholder_gif = st.empty() 
+        with placeholder_gif:
+            st.image(chest_gif_url, width=150, caption="阿吉挖寶中...")
             
         status_text = st.empty()
         progress_bar = st.progress(0, text="準備下載...")
         
         df = fetch_all_data(stock_dict, progress_bar, status_text)
         
-        placeholder_lottie.empty()
+        placeholder_gif.empty()
         
         st.session_state['master_df'] = df
         st.session_state['last_update'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -237,9 +216,9 @@ with st.sidebar:
     st.divider()
     with st.expander("📅 版本開發紀錄"):
         st.markdown("""
-        **Ver 2.0 (Animation Overhaul)**
-        - 新增：多重動畫備援機制，解決動畫讀取失敗。
-        - 視覺：歡迎畫面更換為「🚀 漲停火箭」概念。
+        **Ver 2.1 (GIF Stability)**
+        - 更新：改用 GIF 動態圖片取代 Lottie json，解決雲端讀取錯誤的問題。
+        - 視覺：更新歡迎畫面為「火箭升空」GIF。
         """)
 
 # 主畫面
@@ -254,9 +233,11 @@ if st.session_state['master_df'] is not None:
     if filter_vol_double: df = df[df['成交量'] > (df['昨日成交量'] * 2)]
     if filter_ma_up: df = df[df['位置'] == "🟢年線上"]
 
+    # --- 修正空值錯誤 (ValueError Fix) ---
     if len(df) == 0:
-        st.warning(f"⚠️ 找不到符合條件的股票！")
+        st.warning(f"⚠️ 找不到符合條件的股票！\n\n請嘗試放寬乖離率範圍 (例如拉大到 5%) 或是取消部分勾選。")
     else:
+        # 有資料才做字串處理，防止 ValueError
         st.markdown(f"""
         <div style="background-color: #f0f2f6; padding: 15px; border-radius: 10px; text-align: center; border: 2px solid #ff4b4b;">
             <h2 style="color: #333; margin:0;">🔍 根據目前條件，共篩選出 <span style="color: #ff4b4b; font-size: 1.5em;">{len(df)}</span> 檔股票</h2>
@@ -307,16 +288,10 @@ if st.session_state['master_df'] is not None:
 else:
     st.warning("👈 請先點擊左側 sidebar 的 **「🔄 更新股價資料」** 按鈕開始挖寶！")
     
-    # --- 動畫設定：漲停火箭 (Rocket) ---
-    rocket_urls = [
-        "https://lottie.host/89025c81-4200-47da-9c84-1875155f9a94/2r8r0s0X8r.json", # 首選
-        "https://assets9.lottiefiles.com/packages/lf20_5njp3vgg.json",             # 備用1
-        "https://assets5.lottiefiles.com/packages/lf20_V9t630.json"                # 備用2 (牛市)
-    ]
+    # --- 修改 2: 歡迎畫面改為「火箭噴發」GIF ---
+    # 這是一個 3D 火箭往上衝的 GIF，象徵股價一飛沖天
+    rocket_gif_url = "https://cdn.pixabay.com/animation/2023/07/28/16/27/rocket-8155403_512.gif"
     
-    lottie_hello = load_lottie_retry(rocket_urls)
-    
-    if lottie_hello:
-        st_lottie(lottie_hello, height=400, key="hello_rocket")
-    else:
-        st.info("🚀 系統準備就緒，請開始更新資料！")
+    col1, col2, col3 = st.columns([1, 2, 1])
+    with col2:
+        st.image(rocket_gif_url, caption="祝您操作順利，天天漲停板！🚀")
