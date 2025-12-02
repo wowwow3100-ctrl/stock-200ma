@@ -3,146 +3,181 @@ import yfinance as yf
 import pandas as pd
 import twstock
 import time
+from datetime import datetime
 
-# --- 1. 網頁設定 ---
-st.set_page_config(page_title="台股200MA戰法(校正版)", layout="wide")
+# --- 1. 網頁設定 (版本號 +1) ---
+VER = "ver1.0"
+st.set_page_config(page_title=f"旺來戰法過濾器({VER})", layout="wide")
 
 # --- 2. 核心功能區 ---
 @st.cache_data(ttl=3600)
 def get_stock_list():
-    """取得台股清單"""
+    """取得台股清單 (排除金融/ETF)"""
     tse = twstock.twse
     otc = twstock.tpex
     stock_dict = {}
     
-    # 上市
+    exclude_industries = ['金融保險業', '存託憑證']
+
     for code, info in tse.items():
         if info.type == '股票':
-            stock_dict[f"{code}.TW"] = {'name': info.name, 'code': code, 'group': info.group}
-    # 上櫃
+            if info.group not in exclude_industries:
+                stock_dict[f"{code}.TW"] = {'name': info.name, 'code': code, 'group': info.group}
+                
     for code, info in otc.items():
         if info.type == '股票':
-            stock_dict[f"{code}.TWO"] = {'name': info.name, 'code': code, 'group': info.group}
+            if info.group not in exclude_industries:
+                stock_dict[f"{code}.TWO"] = {'name': info.name, 'code': code, 'group': info.group}
             
     return stock_dict
 
-def process_batch(tickers_batch, stock_dict):
-    """批次處理股票數據"""
-    results = []
+def calculate_kd_values(df, n=9):
+    """計算並回傳最後一天的 K, D 值"""
     try:
-        # 【關鍵修正】auto_adjust=False 確保抓到原始價格
-        data = yf.download(tickers_batch, period="15mo", progress=False, auto_adjust=False)
+        low_min = df['Low'].rolling(window=n).min()
+        high_max = df['High'].rolling(window=n).max()
         
-        if data.empty:
-            return []
-
-        try:
-            df_close = data['Close']
-        except KeyError:
-            return []
+        rsv = (df['Close'] - low_min) / (high_max - low_min) * 100
+        rsv = rsv.fillna(50)
+        
+        k, d = 50, 50
+        # 簡單計算最後幾天的 KD 即可，不用算全部歷史，加速運算
+        # 但為了準確，還是建議跑一個小迴圈
+        k_list, d_list = [], []
+        
+        for r in rsv:
+            k = (2/3) * k + (1/3) * r
+            d = (2/3) * d + (1/3) * k
+            k_list.append(k)
+            d_list.append(d)
             
-        if isinstance(df_close, pd.Series):
-            df_close = df_close.to_frame(name=tickers_batch[0])
+        return k_list[-1], d_list[-1]
+    except:
+        return 50, 50
 
-        # 計算 200 日均線
-        ma200_df = df_close.rolling(window=200).mean()
+def fetch_all_data(stock_dict, progress_bar, status_text):
+    """【廚房】一次性下載並計算所有原始數據"""
+    all_tickers = list(stock_dict.keys())
+    BATCH_SIZE = 30
+    total_batches = (len(all_tickers) // BATCH_SIZE) + 1
+    raw_data_list = []
+
+    # 批次下載
+    for i, batch_idx in enumerate(range(0, len(all_tickers), BATCH_SIZE)):
+        batch = all_tickers[batch_idx : batch_idx + BATCH_SIZE]
         
-        last_prices = df_close.iloc[-1]
-        last_ma200 = ma200_df.iloc[-1]
-
-        for ticker in df_close.columns:
-            try:
-                price = last_prices[ticker]
-                ma200 = last_ma200[ticker]
-                
-                if pd.isna(price) or pd.isna(ma200) or ma200 == 0:
+        try:
+            # 下載數據
+            data = yf.download(batch, period="1y", progress=False, auto_adjust=False)
+            
+            if not data.empty:
+                # 處理多層索引
+                try:
+                    df_c = data['Close']
+                    df_h = data['High']
+                    df_l = data['Low']
+                    df_v = data['Volume']
+                except KeyError:
                     continue
 
-                bias = ((price - ma200) / ma200) * 100
-                
-                stock_info = stock_dict.get(ticker)
-                if not stock_info:
-                    continue
+                if isinstance(df_c, pd.Series):
+                    df_c = df_c.to_frame(name=batch[0])
+                    df_h = df_h.to_frame(name=batch[0])
+                    df_l = df_l.to_frame(name=batch[0])
+                    df_v = df_v.to_frame(name=batch[0])
 
-                status = "🟢年線上" if price >= ma200 else "🔴年線下"
+                # 計算指標
+                ma200_series = df_c.rolling(window=200).mean().iloc[-1]
+                last_price_series = df_c.iloc[-1]
+                last_vol_series = df_v.iloc[-1]
+                prev_vol_series = df_v.iloc[-2]
 
-                results.append({
-                    '代號': stock_info['code'],
-                    '名稱': stock_info['name'],
-                    '收盤價': round(float(price), 2),
-                    '200MA': round(float(ma200), 2),
-                    '乖離率(%)': round(float(bias), 2),
-                    '位置': status,
-                    'abs_bias': abs(bias)
-                })
-            except Exception:
-                continue
-    except Exception:
-        pass
+                for ticker in df_c.columns:
+                    try:
+                        price = last_price_series[ticker]
+                        ma200 = ma200_series[ticker]
+                        vol = last_vol_series[ticker]
+                        prev_vol = prev_vol_series[ticker]
+                        
+                        if pd.isna(price) or pd.isna(ma200) or ma200 == 0:
+                            continue
+
+                        # 計算 KD (針對單檔)
+                        # 為了效能，這裡只對有基本資料的股票算
+                        stock_df = pd.DataFrame({
+                            'Close': df_c[ticker], 'High': df_h[ticker], 'Low': df_l[ticker]
+                        }).dropna()
+                        
+                        k_val, d_val = 0, 0
+                        if len(stock_df) >= 9:
+                            k_val, d_val = calculate_kd_values(stock_df)
+
+                        bias = ((price - ma200) / ma200) * 100
+                        stock_info = stock_dict.get(ticker)
+                        if not stock_info: continue
+
+                        # 存入原始資料庫 (不進行篩選，全部存下來)
+                        raw_data_list.append({
+                            '代號': stock_info['code'],
+                            '名稱': stock_info['name'],
+                            '收盤價': float(price),
+                            '200MA': float(ma200),
+                            '乖離率(%)': float(bias),
+                            'abs_bias': abs(float(bias)), # 用於排序
+                            '成交量': int(vol),
+                            '昨日成交量': int(prev_vol),
+                            'K值': float(k_val),
+                            'D值': float(d_val),
+                            '位置': "🟢年線上" if price >= ma200 else "🔴年線下"
+                        })
+                    except:
+                        continue
+        except:
+            pass
+
+        # 更新進度
+        current_progress = (i + 1) / total_batches
+        progress_bar.progress(current_progress, text=f"資料下載中...({int(current_progress*100)}%)")
+        time.sleep(0.05)
     
-    return results
+    return pd.DataFrame(raw_data_list)
 
 # --- 3. 介面顯示區 ---
-st.title("📈 台股 200MA 戰法 (數值校正版)")
-st.markdown("數值已校正為 **原始收盤價** 計算，與看盤軟體同步。")
+st.title(f"🍍 {VER} 旺來戰法過濾器")
+st.markdown("---")
 
-# 側邊欄控制
+# 初始化 Session State (資料保溫箱)
+if 'master_df' not in st.session_state:
+    st.session_state['master_df'] = None
+if 'last_update' not in st.session_state:
+    st.session_state['last_update'] = None
+
+# 側邊欄：控制面板
 with st.sidebar:
-    st.header("⚙️ 篩選條件")
-    bias_threshold = st.slider("乖離率範圍 (±%)", 0.5, 5.0, 2.0, step=0.1)
-    st.caption("數值越小，代表離年線越近。")
+    st.header("1. 資料庫管理")
     
-    run_btn = st.button("🚀 開始掃描", type="primary")
-
-# 主畫面邏輯
-if run_btn:
-    st.divider()
-    status_text = st.empty()
-    progress_bar = st.progress(0, text="正在準備資料庫...")
-    
-    try:
+    # 更新按鈕
+    if st.button("🔄 更新股價資料 (開市請按我)", type="primary"):
         stock_dict = get_stock_list()
-        all_tickers = list(stock_dict.keys())
+        status_text = st.empty()
+        progress_bar = st.progress(0, text="準備下載...")
         
-        status_text.info(f"鎖定全台 {len(all_tickers)} 檔股票，進行精確運算...")
+        # 呼叫廚房煮菜
+        df = fetch_all_data(stock_dict, progress_bar, status_text)
         
-        BATCH_SIZE = 30
-        total_batches = (len(all_tickers) // BATCH_SIZE) + 1
-        final_data = []
-
-        for i, batch_idx in enumerate(range(0, len(all_tickers), BATCH_SIZE)):
-            batch = all_tickers[batch_idx : batch_idx + BATCH_SIZE]
-            
-            batch_results = process_batch(batch, stock_dict)
-            final_data.extend(batch_results)
-            
-            current_progress = (i + 1) / total_batches
-            progress_bar.progress(current_progress, text=f"掃描進度：{int(current_progress*100)}%")
-            
-            time.sleep(0.05)
+        # 存入保溫箱
+        st.session_state['master_df'] = df
+        st.session_state['last_update'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         
         progress_bar.empty()
+        st.success(f"更新完成！共 {len(df)} 檔資料")
         
-        if final_data:
-            df = pd.DataFrame(final_data)
-            df = df[df['abs_bias'] <= bias_threshold]
-            df = df.sort_values(by='abs_bias')
-            
-            status_text.success(f"✅ 校正完成！精準篩選出 {len(df)} 檔股票。")
-
-            # 這裡是原本出錯的地方，我把文字縮短確保不會斷行
-            tab1, tab2 = st.tabs(["🔥 站上年線", "🧊 跌破年線"])
-            
-            with tab1:
-                df_up = df[df['位置'] == "🟢年線上"].drop(columns=['位置', 'abs_bias'])
-                st.dataframe(df_up, use_container_width=True, hide_index=True)
-                
-            with tab2:
-                df_down = df[df['位置'] == "🔴年線下"].drop(columns=['位置', 'abs_bias'])
-                st.dataframe(df_down, use_container_width=True, hide_index=True)
-                
-        else:
-            status_text.warning("範圍內沒有符合條件的股票，請嘗試放大乖離率範圍。")
-
-    except Exception as e:
-        st.error(f"發生錯誤: {e}")
+    if st.session_state['last_update']:
+        st.caption(f"最後更新：{st.session_state['last_update']}")
+    
+    st.divider()
+    
+    st.header("2. 即時篩選器 (免等待)")
+    
+    # 這裡的調整會「即時」反應，不用重新下載
+    bias_threshold = st.slider("乖離率範圍 (±%)", 0.5, 5.0,
