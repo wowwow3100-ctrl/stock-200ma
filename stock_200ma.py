@@ -9,7 +9,7 @@ import requests
 from streamlit_lottie import st_lottie
 
 # --- 1. 網頁設定 ---
-VER = "ver1.8"
+VER = "ver1.9"
 st.set_page_config(page_title=f"旺來戰法過濾器({VER})", layout="wide")
 
 # --- 2. 核心功能區 ---
@@ -185,22 +185,22 @@ if 'last_update' not in st.session_state:
 with st.sidebar:
     st.header("1. 資料庫管理")
     
-    # --- 修改 1: 更換為更穩定的 Loading 動畫 (防止 404) ---
-    lottie_loading_url = "https://lottie.host/9c336184-4869-42b7-a35b-17983949ce28/U2d2O8h0bI.json"
-    lottie_json = load_lottieurl(lottie_loading_url)
-
+    # --- 修改 1: 使用更穩定的官方 CDN 連結 (寶箱 & 火箭) ---
+    # 開寶箱 (Treasure Chest)
+    lottie_chest_url = "https://assets10.lottiefiles.com/packages/lf20_7i3wdaug.json"
+    
     if st.button("🔄 更新股價資料 (開市請按我)", type="primary"):
         stock_dict = get_stock_list()
         
+        # 讀取動畫 (如果失敗會回傳 None)
+        lottie_json = load_lottieurl(lottie_chest_url)
+        
         placeholder_lottie = st.empty() 
         with placeholder_lottie:
-            # --- 關鍵修正: 加裝「防呆保險絲」 ---
-            # 如果 lottie_json 是 None (網址壞掉)，就不執行 st_lottie，改顯示文字
-            # 這樣程式永遠不會因為動畫壞掉而當機
             if lottie_json:
-                st_lottie(lottie_json, height=200, key="loading_ani")
+                st_lottie(lottie_json, height=200, key="loading_chest")
             else:
-                st.info("🤖 阿吉機器人啟動中 (動畫讀取失敗，但不影響功能)...")
+                st.info("🤖 阿吉正在挖寶中 (動畫連線失敗，但不影響功能)...")
             
         status_text = st.empty()
         progress_bar = st.progress(0, text="準備下載...")
@@ -232,12 +232,11 @@ with st.sidebar:
     st.divider()
     with st.expander("📅 版本開發紀錄"):
         st.markdown("""
-        **Ver 1.8 (Safety Patch)**
-        - 修復：動畫連結失效導致當機的問題。
-        - 新增：動畫讀取失敗的防呆機制 (Safety Check)。
+        **Ver 1.9 (Animation Fix)**
+        - 修復：更換為高穩定性的官方 CDN 動畫連結，解決動畫載入失敗問題。
         
-        **Ver 1.7 (Animation)**
-        - 更新：資料下載動畫 / 歡迎動畫。
+        **Ver 1.8 (Safety Patch)**
+        - 新增：動畫讀取失敗的防呆機制。
         """)
 
 # 主畫面
@@ -305,11 +304,12 @@ if st.session_state['master_df'] is not None:
 else:
     st.warning("👈 請先點擊左側 sidebar 的 **「🔄 更新股價資料」** 按鈕開始挖寶！")
     
-    # 同樣加上防呆機制
-    lottie_hello_url = "https://lottie.host/89025c81-4200-47da-9c84-1875155f9a94/2r8r0s0X8r.json"
-    lottie_hello = load_lottieurl(lottie_hello_url)
+    # 歡迎動畫：火箭升空
+    lottie_rocket_url = "https://assets9.lottiefiles.com/packages/lf20_5njp3vgg.json"
+    
+    lottie_hello = load_lottieurl(lottie_rocket_url)
     
     if lottie_hello:
-        st_lottie(lottie_hello, height=300, key="hello")
+        st_lottie(lottie_hello, height=400, key="hello_rocket")
     else:
         st.info("🚀 系統準備就緒，請開始更新資料！")
