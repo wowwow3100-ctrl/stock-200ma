@@ -7,7 +7,7 @@ from datetime import datetime
 import plotly.graph_objects as go
 
 # --- 1. 網頁設定 ---
-VER = "ver1.2"
+VER = "ver1.3"
 st.set_page_config(page_title=f"旺來戰法過濾器({VER})", layout="wide")
 
 # --- 2. 核心功能區 ---
@@ -120,10 +120,7 @@ def fetch_all_data(stock_dict, progress_bar, status_text):
 def plot_stock_chart(ticker, name):
     """繪製優化版 K 線圖"""
     try:
-        # 1. 抓取資料
         df = yf.download(ticker, period="1y", progress=False, auto_adjust=False)
-        
-        # 2. 資料清理：移除成交量為 0 或股價為空的異常交易日
         df = df[df['Volume'] > 0]
         df = df.dropna()
 
@@ -131,14 +128,11 @@ def plot_stock_chart(ticker, name):
             st.error("無法取得有效數據，可能是近期無交易。")
             return
 
-        # 計算均線
         df['200MA'] = df['Close'].rolling(window=200).mean()
         df['20MA'] = df['Close'].rolling(window=20).mean()
 
-        # 3. 建立圖表
         fig = go.Figure()
 
-        # K線圖 (設定台股配色：紅漲綠跌)
         fig.add_trace(go.Candlestick(
             x=df.index,
             open=df['Open'], high=df['High'],
@@ -148,32 +142,26 @@ def plot_stock_chart(ticker, name):
             decreasing_line_color='green'
         ))
 
-        # 200MA (橘色粗線)
         fig.add_trace(go.Scatter(
             x=df.index, y=df['200MA'],
             line=dict(color='orange', width=2),
             name='200MA (年線)'
         ))
 
-        # 20MA (藍色細線，輔助看月線)
         fig.add_trace(go.Scatter(
             x=df.index, y=df['20MA'],
             line=dict(color='skyblue', width=1),
             name='20MA (月線)'
         ))
 
-        # 4. 版面設定 (去除假日空缺)
         fig.update_layout(
             title=f"📊 {name} ({ticker}) 技術分析",
             yaxis_title='股價',
-            xaxis_rangeslider_visible=False, # 隱藏下方滑桿，增加可讀範圍
+            xaxis_rangeslider_visible=False,
             height=600,
             hovermode="x unified",
-            # 讓圖表自動移除六日 (Gapless)
             xaxis=dict(
-                rangebreaks=[
-                    dict(bounds=["sat", "mon"]), # 移除週六到週一的空缺
-                ]
+                rangebreaks=[dict(bounds=["sat", "mon"])]
             )
         )
         st.plotly_chart(fig, use_container_width=True)
@@ -217,10 +205,12 @@ with st.sidebar:
     st.divider()
     with st.expander("📅 版本開發紀錄"):
         st.markdown("""
+        **Ver 1.3 (Stability)**
+        - 新增：篩選結果為 0 時的安全檢查，防止程式崩潰。
+        
         **Ver 1.2 (Visual Upgrade)**
         - 介面優化：新增醒目篩選統計看板。
         - 列表優化：年線上/下改為整列背景色區分。
-        - 圖表修復：修正 K 線圖比例與配色 (紅漲綠跌)，移除假日空缺。
         
         **Ver 1.1 (Chart Upgrade)**
         - 新增個股 K 線圖與 200MA 視覺化分析。
@@ -237,56 +227,55 @@ if st.session_state['master_df'] is not None:
     if filter_vol_double: df = df[df['成交量'] > (df['昨日成交量'] * 2)]
     if filter_ma_up: df = df[df['位置'] == "🟢年線上"]
 
-    # --- 修改 1：超大醒目統計數字 ---
-    st.markdown(f"""
-    <div style="background-color: #f0f2f6; padding: 15px; border-radius: 10px; text-align: center; border: 2px solid #ff4b4b;">
-        <h2 style="color: #333; margin:0;">🔍 根據目前條件，共篩選出 <span style="color: #ff4b4b; font-size: 1.5em;">{len(df)}</span> 檔股票</h2>
-    </div>
-    <br>
-    """, unsafe_allow_html=True)
-    
-    # 整理顯示
-    df['成交量(張)'] = (df['成交量'] / 1000).astype(int)
-    df['KD值'] = df.apply(lambda x: f"K:{int(x['K值'])} D:{int(x['D值'])}", axis=1)
-    df['選股標籤'] = df['代號'] + " " + df['名稱']
-    
-    display_cols = ['代號', '名稱', '收盤價', '成交量(張)', '乖離率(%)', '位置', 'KD值']
-    df = df.sort_values(by='abs_bias')
-    
-    tab1, tab2 = st.tabs(["📋 篩選結果列表", "📊 K線技術分析"])
-    
-    with tab1:
-        # --- 修改 2：整列上色 (紅綠分明) ---
-        def highlight_row(row):
-            # 這裡設定整行的背景顏色
-            if row['位置'] == "🟢年線上":
-                return ['background-color: #e6fffa; color: black'] * len(row) # 淺綠底
-            else:
-                return ['background-color: #fff0f0; color: black'] * len(row) # 淺紅底
+    # --- 關鍵修正：檢查是否為空 ---
+    if len(df) == 0:
+        st.warning(f"⚠️ 找不到符合條件的股票！\n\n目前的篩選條件可能太嚴格了 (例如乖離率 {bias_threshold}% 太小)。\n請嘗試放寬條件，或是取消部分勾選框。")
+    else:
+        # 有資料才執行顯示與運算
+        st.markdown(f"""
+        <div style="background-color: #f0f2f6; padding: 15px; border-radius: 10px; text-align: center; border: 2px solid #ff4b4b;">
+            <h2 style="color: #333; margin:0;">🔍 根據目前條件，共篩選出 <span style="color: #ff4b4b; font-size: 1.5em;">{len(df)}</span> 檔股票</h2>
+        </div>
+        <br>
+        """, unsafe_allow_html=True)
+        
+        # 整理顯示
+        df['成交量(張)'] = (df['成交量'] / 1000).astype(int)
+        df['KD值'] = df.apply(lambda x: f"K:{int(x['K值'])} D:{int(x['D值'])}", axis=1)
+        df['選股標籤'] = df['代號'] + " " + df['名稱']
+        
+        display_cols = ['代號', '名稱', '收盤價', '成交量(張)', '乖離率(%)', '位置', 'KD值']
+        df = df.sort_values(by='abs_bias')
+        
+        tab1, tab2 = st.tabs(["📋 篩選結果列表", "📊 K線技術分析"])
+        
+        with tab1:
+            def highlight_row(row):
+                if row['位置'] == "🟢年線上":
+                    return ['background-color: #e6fffa; color: black'] * len(row)
+                else:
+                    return ['background-color: #fff0f0; color: black'] * len(row)
 
-        st.dataframe(
-            df[display_cols].style.apply(highlight_row, axis=1),
-            use_container_width=True,
-            hide_index=True
-        )
+            st.dataframe(
+                df[display_cols].style.apply(highlight_row, axis=1),
+                use_container_width=True,
+                hide_index=True
+            )
 
-    with tab2:
-        st.markdown("### 🔍 個股詳細技術分析")
-        if len(df) > 0:
-            selected_stock_label = st.selectbox("請選擇一檔股票查看圖表：", df['選股標籤'].tolist())
-            selected_row = df[df['選股標籤'] == selected_stock_label].iloc[0]
-            target_ticker = selected_row['完整代號']
-            target_name = selected_row['名稱']
-            
-            # --- 修改 3：呼叫優化版畫圖函數 ---
-            plot_stock_chart(target_ticker, target_name)
-            
-            col1, col2, col3 = st.columns(3)
-            col1.metric("目前股價", selected_row['收盤價'])
-            col2.metric("200日均線", selected_row['200MA'], delta=f"{selected_row['乖離率(%)']}%")
-            col3.metric("KD指標", selected_row['KD值'])
-        else:
-            st.warning("目前沒有篩選出股票，無法畫圖。")
+        with tab2:
+            st.markdown("### 🔍 個股詳細技術分析")
+            if len(df) > 0:
+                selected_stock_label = st.selectbox("請選擇一檔股票查看圖表：", df['選股標籤'].tolist())
+                selected_row = df[df['選股標籤'] == selected_stock_label].iloc[0]
+                target_ticker = selected_row['完整代號']
+                target_name = selected_row['名稱']
+                
+                plot_stock_chart(target_ticker, target_name)
+                
+                col1, col2, col3 = st.columns(3)
+                col1.metric("目前股價", selected_row['收盤價'])
+                col2.metric("200日均線", selected_row['200MA'], delta=f"{selected_row['乖離率(%)']}%")
+                col3.metric("KD指標", selected_row['KD值'])
 
 else:
     st.warning("👈 請先點擊左側 sidebar 的 **「🔄 更新股價資料」** 按鈕開始下載數據！")
