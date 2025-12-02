@@ -9,7 +9,7 @@ import requests
 from streamlit_lottie import st_lottie
 
 # --- 1. 網頁設定 ---
-VER = "ver1.7"
+VER = "ver1.8"
 st.set_page_config(page_title=f"旺來戰法過濾器({VER})", layout="wide")
 
 # --- 2. 核心功能區 ---
@@ -35,10 +35,14 @@ def get_stock_list():
     return stock_dict
 
 def load_lottieurl(url: str):
-    r = requests.get(url)
-    if r.status_code != 200:
+    """讀取 Lottie 動畫函數 (增加錯誤處理)"""
+    try:
+        r = requests.get(url)
+        if r.status_code != 200:
+            return None
+        return r.json()
+    except:
         return None
-    return r.json()
 
 def calculate_kd_values(df, n=9):
     try:
@@ -136,7 +140,6 @@ def fetch_all_data(stock_dict, progress_bar, status_text):
         except: pass
         
         current_progress = (i + 1) / total_batches
-        # 更新進度條文字
         progress_bar.progress(current_progress, text=f"阿吉正在努力挖掘寶藏中...({int(current_progress*100)}%)")
         time.sleep(0.05)
     
@@ -182,8 +185,8 @@ if 'last_update' not in st.session_state:
 with st.sidebar:
     st.header("1. 資料庫管理")
     
-    # --- 修改 1: 更換為「開寶箱」動畫 ---
-    lottie_loading_url = "https://assets10.lottiefiles.com/packages/lf20_8kzgiafm.json"
+    # --- 修改 1: 更換為更穩定的 Loading 動畫 (防止 404) ---
+    lottie_loading_url = "https://lottie.host/9c336184-4869-42b7-a35b-17983949ce28/U2d2O8h0bI.json"
     lottie_json = load_lottieurl(lottie_loading_url)
 
     if st.button("🔄 更新股價資料 (開市請按我)", type="primary"):
@@ -191,8 +194,13 @@ with st.sidebar:
         
         placeholder_lottie = st.empty() 
         with placeholder_lottie:
-            # 調整寶箱動畫大小
-            st_lottie(lottie_json, height=200, key="loading_ani")
+            # --- 關鍵修正: 加裝「防呆保險絲」 ---
+            # 如果 lottie_json 是 None (網址壞掉)，就不執行 st_lottie，改顯示文字
+            # 這樣程式永遠不會因為動畫壞掉而當機
+            if lottie_json:
+                st_lottie(lottie_json, height=200, key="loading_ani")
+            else:
+                st.info("🤖 阿吉機器人啟動中 (動畫讀取失敗，但不影響功能)...")
             
         status_text = st.empty()
         progress_bar = st.progress(0, text="準備下載...")
@@ -224,12 +232,12 @@ with st.sidebar:
     st.divider()
     with st.expander("📅 版本開發紀錄"):
         st.markdown("""
+        **Ver 1.8 (Safety Patch)**
+        - 修復：動畫連結失效導致當機的問題。
+        - 新增：動畫讀取失敗的防呆機制 (Safety Check)。
+        
         **Ver 1.7 (Animation)**
-        - 更新：資料下載動畫更改為「🎁 開寶箱」。
-        - 更新：歡迎動畫更改為「🚀 漲停火箭」。
-
-        **Ver 1.6 (Animation)**
-        - 新增：資料更新動畫。
+        - 更新：資料下載動畫 / 歡迎動畫。
         """)
 
 # 主畫面
@@ -295,9 +303,13 @@ if st.session_state['master_df'] is not None:
                 col3.metric("KD指標", selected_row['KD值'])
 
 else:
-    # --- 修改 2: 更換為「漲停火箭」歡迎動畫 ---
     st.warning("👈 請先點擊左側 sidebar 的 **「🔄 更新股價資料」** 按鈕開始挖寶！")
-    lottie_hello_url = "https://assets5.lottiefiles.com/packages/lf20_5njp3vgg.json"
+    
+    # 同樣加上防呆機制
+    lottie_hello_url = "https://lottie.host/89025c81-4200-47da-9c84-1875155f9a94/2r8r0s0X8r.json"
     lottie_hello = load_lottieurl(lottie_hello_url)
-    # 調整火箭動畫大小
-    st_lottie(lottie_hello, height=400, key="hello")
+    
+    if lottie_hello:
+        st_lottie(lottie_hello, height=300, key="hello")
+    else:
+        st.info("🚀 系統準備就緒，請開始更新資料！")
