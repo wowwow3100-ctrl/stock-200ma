@@ -6,10 +6,10 @@ import time
 from datetime import datetime
 import plotly.graph_objects as go
 import requests
-from streamlit_lottie import st_lottie # 引入動畫套件
+from streamlit_lottie import st_lottie
 
 # --- 1. 網頁設定 ---
-VER = "ver1.6"
+VER = "ver1.7"
 st.set_page_config(page_title=f"旺來戰法過濾器({VER})", layout="wide")
 
 # --- 2. 核心功能區 ---
@@ -35,7 +35,6 @@ def get_stock_list():
     return stock_dict
 
 def load_lottieurl(url: str):
-    """讀取 Lottie 動畫函數"""
     r = requests.get(url)
     if r.status_code != 200:
         return None
@@ -98,7 +97,6 @@ def fetch_all_data(stock_dict, progress_bar, status_text):
                         
                         if pd.isna(price) or pd.isna(ma200) or ma200 == 0: continue
 
-                        # 開寶箱判定
                         is_treasure = False
                         my_recent_c = recent_close_df[ticker]
                         my_recent_ma = recent_ma200_df[ticker]
@@ -138,7 +136,8 @@ def fetch_all_data(stock_dict, progress_bar, status_text):
         except: pass
         
         current_progress = (i + 1) / total_batches
-        progress_bar.progress(current_progress, text=f"阿吉正在努力搬運資料中...({int(current_progress*100)}%)")
+        # 更新進度條文字
+        progress_bar.progress(current_progress, text=f"阿吉正在努力挖掘寶藏中...({int(current_progress*100)}%)")
         time.sleep(0.05)
     
     return pd.DataFrame(raw_data_list)
@@ -183,25 +182,23 @@ if 'last_update' not in st.session_state:
 with st.sidebar:
     st.header("1. 資料庫管理")
     
-    # 這裡載入動畫 (機器人掃描)
-    lottie_loading_url = "https://assets9.lottiefiles.com/packages/lf20_w51pcehl.json"
+    # --- 修改 1: 更換為「開寶箱」動畫 ---
+    lottie_loading_url = "https://assets10.lottiefiles.com/packages/lf20_8kzgiafm.json"
     lottie_json = load_lottieurl(lottie_loading_url)
 
     if st.button("🔄 更新股價資料 (開市請按我)", type="primary"):
         stock_dict = get_stock_list()
         
-        # --- 動畫顯示區 ---
-        # 建立一個空區塊放動畫
         placeholder_lottie = st.empty() 
         with placeholder_lottie:
-            st_lottie(lottie_json, height=150, key="loading_ani")
+            # 調整寶箱動畫大小
+            st_lottie(lottie_json, height=200, key="loading_ani")
             
         status_text = st.empty()
         progress_bar = st.progress(0, text="準備下載...")
         
         df = fetch_all_data(stock_dict, progress_bar, status_text)
         
-        # 下載完成，清除動畫
         placeholder_lottie.empty()
         
         st.session_state['master_df'] = df
@@ -227,11 +224,12 @@ with st.sidebar:
     st.divider()
     with st.expander("📅 版本開發紀錄"):
         st.markdown("""
+        **Ver 1.7 (Animation)**
+        - 更新：資料下載動畫更改為「🎁 開寶箱」。
+        - 更新：歡迎動畫更改為「🚀 漲停火箭」。
+
         **Ver 1.6 (Animation)**
-        - 新增：資料更新時的「阿吉機器人」動畫，等待不再枯燥！
-        
-        **Ver 1.5 (Treasure Hunt)**
-        - 新增策略：開寶箱戰法。
+        - 新增：資料更新動畫。
         """)
 
 # 主畫面
@@ -247,7 +245,7 @@ if st.session_state['master_df'] is not None:
     if filter_ma_up: df = df[df['位置'] == "🟢年線上"]
 
     if len(df) == 0:
-        st.warning(f"⚠️ 找不到符合條件的股票！\n\n如果勾選了「開寶箱」，代表最近沒有股票出現這種「假跌破」型態，或者是乖離率範圍設太小了。")
+        st.warning(f"⚠️ 找不到符合條件的股票！")
     else:
         st.markdown(f"""
         <div style="background-color: #f0f2f6; padding: 15px; border-radius: 10px; text-align: center; border: 2px solid #ff4b4b;">
@@ -297,8 +295,9 @@ if st.session_state['master_df'] is not None:
                 col3.metric("KD指標", selected_row['KD值'])
 
 else:
-    # 這裡也放一個歡迎動畫
-    st.warning("👈 請先點擊左側 sidebar 的 **「🔄 更新股價資料」** 按鈕開始下載數據！")
-    lottie_hello_url = "https://assets5.lottiefiles.com/packages/lf20_V9t630.json"
+    # --- 修改 2: 更換為「漲停火箭」歡迎動畫 ---
+    st.warning("👈 請先點擊左側 sidebar 的 **「🔄 更新股價資料」** 按鈕開始挖寶！")
+    lottie_hello_url = "https://assets5.lottiefiles.com/packages/lf20_5njp3vgg.json"
     lottie_hello = load_lottieurl(lottie_hello_url)
-    st_lottie(lottie_hello, height=300, key="hello")
+    # 調整火箭動畫大小
+    st_lottie(lottie_hello, height=400, key="hello")
