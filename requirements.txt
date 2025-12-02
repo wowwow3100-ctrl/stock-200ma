@@ -4,3 +4,5 @@ pandas
 twstock
 lxml
 plotly
+requests
+streamlit-lottie
