@@ -5,9 +5,11 @@ import twstock
 import time
 from datetime import datetime
 import plotly.graph_objects as go
+import requests
+from streamlit_lottie import st_lottie # 引入動畫套件
 
 # --- 1. 網頁設定 ---
-VER = "ver1.5"
+VER = "ver1.6"
 st.set_page_config(page_title=f"旺來戰法過濾器({VER})", layout="wide")
 
 # --- 2. 核心功能區 ---
@@ -32,6 +34,13 @@ def get_stock_list():
             
     return stock_dict
 
+def load_lottieurl(url: str):
+    """讀取 Lottie 動畫函數"""
+    r = requests.get(url)
+    if r.status_code != 200:
+        return None
+    return r.json()
+
 def calculate_kd_values(df, n=9):
     try:
         low_min = df['Low'].rolling(window=n).min()
@@ -55,7 +64,6 @@ def fetch_all_data(stock_dict, progress_bar, status_text):
     for i, batch_idx in enumerate(range(0, len(all_tickers), BATCH_SIZE)):
         batch = all_tickers[batch_idx : batch_idx + BATCH_SIZE]
         try:
-            # 必須抓取足夠歷史資料以計算均線和回測
             data = yf.download(batch, period="1y", interval="1d", progress=False, auto_adjust=False)
             if not data.empty:
                 try:
@@ -72,16 +80,12 @@ def fetch_all_data(stock_dict, progress_bar, status_text):
                     df_l = df_l.to_frame(name=batch[0])
                     df_v = df_v.to_frame(name=batch[0])
 
-                # 計算 200MA 序列 (整批運算)
                 ma200_df = df_c.rolling(window=200).mean()
-
-                # 取最後一天的各項數據
                 last_price_series = df_c.iloc[-1]
                 last_ma200_series = ma200_df.iloc[-1]
                 last_vol_series = df_v.iloc[-1]
                 prev_vol_series = df_v.iloc[-2]
 
-                # 取過去 8 天的資料 (今天 + 前 7 天) 用來判斷開寶箱
                 recent_close_df = df_c.iloc[-8:]
                 recent_ma200_df = ma200_df.iloc[-8:]
 
@@ -94,24 +98,18 @@ def fetch_all_data(stock_dict, progress_bar, status_text):
                         
                         if pd.isna(price) or pd.isna(ma200) or ma200 == 0: continue
 
-                        # --- 開寶箱邏輯判定 ---
+                        # 開寶箱判定
                         is_treasure = False
-                        # 取得該股過去 8 天的收盤與均線
                         my_recent_c = recent_close_df[ticker]
                         my_recent_ma = recent_ma200_df[ticker]
-                        
                         if len(my_recent_c) >= 8:
-                            # 1. 今天必須站上年線
                             cond_today_up = my_recent_c.iloc[-1] > my_recent_ma.iloc[-1]
-                            # 2. 過去 7 天 (不含今天) 至少有一天跌破年線
                             past_c = my_recent_c.iloc[:-1]
                             past_ma = my_recent_ma.iloc[:-1]
                             cond_past_down = (past_c < past_ma).any()
-                            
                             if cond_today_up and cond_past_down:
                                 is_treasure = True
 
-                        # KD 計算
                         stock_df = pd.DataFrame({'Close': df_c[ticker], 'High': df_h[ticker], 'Low': df_l[ticker]}).dropna()
                         k_val, d_val = 0, 0
                         if len(stock_df) >= 9:
@@ -134,13 +132,13 @@ def fetch_all_data(stock_dict, progress_bar, status_text):
                             'K值': float(k_val),
                             'D值': float(d_val),
                             '位置': "🟢年線上" if price >= ma200 else "🔴年線下",
-                            '開寶箱': is_treasure  # 新增欄位
+                            '開寶箱': is_treasure
                         })
                     except: continue
         except: pass
         
         current_progress = (i + 1) / total_batches
-        progress_bar.progress(current_progress, text=f"資料下載中...({int(current_progress*100)}%)")
+        progress_bar.progress(current_progress, text=f"阿吉正在努力搬運資料中...({int(current_progress*100)}%)")
         time.sleep(0.05)
     
     return pd.DataFrame(raw_data_list)
@@ -184,11 +182,28 @@ if 'last_update' not in st.session_state:
 
 with st.sidebar:
     st.header("1. 資料庫管理")
+    
+    # 這裡載入動畫 (機器人掃描)
+    lottie_loading_url = "https://assets9.lottiefiles.com/packages/lf20_w51pcehl.json"
+    lottie_json = load_lottieurl(lottie_loading_url)
+
     if st.button("🔄 更新股價資料 (開市請按我)", type="primary"):
         stock_dict = get_stock_list()
+        
+        # --- 動畫顯示區 ---
+        # 建立一個空區塊放動畫
+        placeholder_lottie = st.empty() 
+        with placeholder_lottie:
+            st_lottie(lottie_json, height=150, key="loading_ani")
+            
         status_text = st.empty()
         progress_bar = st.progress(0, text="準備下載...")
+        
         df = fetch_all_data(stock_dict, progress_bar, status_text)
+        
+        # 下載完成，清除動畫
+        placeholder_lottie.empty()
+        
         st.session_state['master_df'] = df
         st.session_state['last_update'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         progress_bar.empty()
@@ -203,10 +218,8 @@ with st.sidebar:
     min_vol_input = st.number_input("最低成交量 (張)", value=1000, step=100)
     
     st.subheader("進階條件")
-    # --- 新增按鈕 ---
     filter_treasure = st.checkbox("🎁 開寶箱 (跌破年線7日內站回)", value=False)
     st.caption("🔍 尋找假跌破後迅速拉回的強勢股")
-    
     filter_kd = st.checkbox("KD 黃金交叉 (K > D)", value=False)
     filter_vol_double = st.checkbox("爆量 (今日 > 昨日x2)", value=False)
     filter_ma_up = st.checkbox("只看站上年線 (多方)", value=False)
@@ -214,26 +227,21 @@ with st.sidebar:
     st.divider()
     with st.expander("📅 版本開發紀錄"):
         st.markdown("""
-        **Ver 1.5 (Treasure Hunt)**
-        - 新增策略：**開寶箱戰法**。自動偵測「過去7日曾跌破年線，但今日站上年線」的股票。
+        **Ver 1.6 (Animation)**
+        - 新增：資料更新時的「阿吉機器人」動畫，等待不再枯燥！
         
-        **Ver 1.4 (Daily Chart Fix)**
-        - 圖表修正：強制指定「日(1d)」資料頻率，移除假日空缺。
+        **Ver 1.5 (Treasure Hunt)**
+        - 新增策略：開寶箱戰法。
         """)
 
 # 主畫面
 if st.session_state['master_df'] is not None:
     df = st.session_state['master_df'].copy()
     
-    # 1. 基礎篩選
     df = df[df['abs_bias'] <= bias_threshold]
     df = df[df['成交量'] >= (min_vol_input * 1000)]
     
-    # 2. 開寶箱篩選 (如果勾選，就只留寶箱股)
-    if filter_treasure:
-        df = df[df['開寶箱'] == True]
-        
-    # 3. 其他篩選
+    if filter_treasure: df = df[df['開寶箱'] == True]
     if filter_kd: df = df[df['K值'] > df['D值']]
     if filter_vol_double: df = df[df['成交量'] > (df['昨日成交量'] * 2)]
     if filter_ma_up: df = df[df['位置'] == "🟢年線上"]
@@ -252,10 +260,8 @@ if st.session_state['master_df'] is not None:
         df['KD值'] = df.apply(lambda x: f"K:{int(x['K值'])} D:{int(x['D值'])}", axis=1)
         df['選股標籤'] = df['代號'] + " " + df['名稱']
         
-        # 顯示欄位加入「開寶箱」標記(如果有勾的話)
         display_cols = ['代號', '名稱', '收盤價', '成交量(張)', '乖離率(%)', '位置', 'KD值']
         if filter_treasure:
-             # 如果是開寶箱模式，我們把乖離率排序改為成交量排序，看誰量大
              df = df.sort_values(by='成交量', ascending=False)
         else:
              df = df.sort_values(by='abs_bias')
@@ -291,4 +297,8 @@ if st.session_state['master_df'] is not None:
                 col3.metric("KD指標", selected_row['KD值'])
 
 else:
+    # 這裡也放一個歡迎動畫
     st.warning("👈 請先點擊左側 sidebar 的 **「🔄 更新股價資料」** 按鈕開始下載數據！")
+    lottie_hello_url = "https://assets5.lottiefiles.com/packages/lf20_V9t630.json"
+    lottie_hello = load_lottieurl(lottie_hello_url)
+    st_lottie(lottie_hello, height=300, key="hello")
