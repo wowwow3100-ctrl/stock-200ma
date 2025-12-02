@@ -5,12 +5,12 @@ import twstock
 import time
 
 # --- 1. 網頁設定 ---
-st.set_page_config(page_title="台股200MA戰法(PRO)", layout="wide")
+st.set_page_config(page_title="台股200MA戰法(校正版)", layout="wide")
 
 # --- 2. 核心功能區 ---
-@st.cache_data(ttl=3600)  # 設定快取，1小時內不用重新抓清單
+@st.cache_data(ttl=3600)
 def get_stock_list():
-    """取得台股清單 (上市+上櫃)"""
+    """取得台股清單"""
     tse = twstock.twse
     otc = twstock.tpex
     stock_dict = {}
@@ -30,25 +30,28 @@ def process_batch(tickers_batch, stock_dict):
     """批次處理股票數據"""
     results = []
     try:
-        # 下載數據 (只抓收盤價，速度最快)
-        data = yf.download(tickers_batch, period="15mo", progress=False, auto_adjust=True)
+        # 【關鍵修正】auto_adjust=False 
+        # 這樣才會抓到「原始價格」，算出來的均線才會跟 Goodinfo/XQ 一樣
+        data = yf.download(tickers_batch, period="15mo", progress=False, auto_adjust=False)
         
         if data.empty:
             return []
 
-        # 處理資料格式 (相容性處理)
+        # 處理資料格式
         try:
+            # 抓取原始收盤價 (Close) 而不是還原股價 (Adj Close)
             df_close = data['Close']
         except KeyError:
             return []
             
+        # 如果只有一檔，格式會變成 Series，需轉回 DataFrame
         if isinstance(df_close, pd.Series):
             df_close = df_close.to_frame(name=tickers_batch[0])
 
         # 計算 200 日均線
         ma200_df = df_close.rolling(window=200).mean()
         
-        # 取得最新一天的數據
+        # 取得最新一天的數據 (使用 iloc 取最後一列)
         last_prices = df_close.iloc[-1]
         last_ma200 = ma200_df.iloc[-1]
 
@@ -57,7 +60,7 @@ def process_batch(tickers_batch, stock_dict):
                 price = last_prices[ticker]
                 ma200 = last_ma200[ticker]
                 
-                # 過濾無效數據
+                # 過濾無效數據 (NaN 或 0)
                 if pd.isna(price) or pd.isna(ma200) or ma200 == 0:
                     continue
 
@@ -77,7 +80,7 @@ def process_batch(tickers_batch, stock_dict):
                     '200MA': round(float(ma200), 2),
                     '乖離率(%)': round(float(bias), 2),
                     '位置': status,
-                    'abs_bias': abs(bias) # 排序用隱藏欄位
+                    'abs_bias': abs(bias)
                 })
             except Exception:
                 continue
@@ -87,14 +90,15 @@ def process_batch(tickers_batch, stock_dict):
     return results
 
 # --- 3. 介面顯示區 ---
-st.title("📈 台股 200MA 戰法篩選器 (雲端版)")
-st.markdown("此工具專門篩選 **股價回測年線 (200MA)** 附近的潛力股。")
+st.title("📈 台股 200MA 戰法 (數值校正版)")
+st.markdown("數值已校正為 **原始收盤價** 計算，與看盤軟體同步。")
 
 # 側邊欄控制
 with st.sidebar:
     st.header("⚙️ 篩選條件")
-    bias_threshold = st.slider("乖離率範圍 (±%)", 0.5, 5.0, 3.0, step=0.5)
-    st.caption("建議值：3% 以內代表剛好黏在年線附近。")
+    # 把預設值縮小到 2.0%，避免股票太多
+    bias_threshold = st.slider("乖離率範圍 (±%)", 0.5, 5.0, 2.0, step=0.1)
+    st.caption("數值越小，代表離年線越近。")
     
     run_btn = st.button("🚀 開始掃描", type="primary")
 
@@ -105,14 +109,13 @@ if run_btn:
     progress_bar = st.progress(0, text="正在準備資料庫...")
     
     try:
-        # 1. 取得清單
         stock_dict = get_stock_list()
         all_tickers = list(stock_dict.keys())
         
-        status_text.info(f"鎖定全台 {len(all_tickers)} 檔股票，開始批次運算...")
+        status_text.info(f"鎖定全台 {len(all_tickers)} 檔股票，進行精確運算...")
         
-        # 2. 批次執行
-        BATCH_SIZE = 50
+        # 批次量設定 30 (改小一點確保資料不漏)
+        BATCH_SIZE = 30
         total_batches = (len(all_tickers) // BATCH_SIZE) + 1
         final_data = []
 
@@ -127,34 +130,17 @@ if run_btn:
             current_progress = (i + 1) / total_batches
             progress_bar.progress(current_progress, text=f"掃描進度：{int(current_progress*100)}%")
             
-            # 稍微休息避免被擋
-            time.sleep(0.1)
+            time.sleep(0.05)
         
-        progress_bar.empty() # 跑完隱藏進度條
+        progress_bar.empty()
         
         if final_data:
-            # 3. 資料整理與顯示
             df = pd.DataFrame(final_data)
             
-            # 篩選使用者設定的乖離率
+            # 篩選
             df = df[df['abs_bias'] <= bias_threshold]
             df = df.sort_values(by='abs_bias')
             
-            status_text.success(f"✅ 掃描完成！共有 {len(df)} 檔股票符合條件。")
+            status_text.success(f"✅ 校正完成！精準篩選出 {len(df)} 檔股票。")
 
-            # 分頁顯示
-            tab1, tab2 = st.tabs(["🔥 站上年線 (多方)", "🧊 跌破年線 (觀察)"])
-            
-            with tab1:
-                df_up = df[df['位置'] == "🟢年線上"].drop(columns=['位置', 'abs_bias'])
-                st.dataframe(df_up, use_container_width=True, hide_index=True)
-                
-            with tab2:
-                df_down = df[df['位置'] == "🔴年線下"].drop(columns=['位置', 'abs_bias'])
-                st.dataframe(df_down, use_container_width=True, hide_index=True)
-                
-        else:
-            status_text.warning("沒有抓取到符合條件的資料。")
-
-    except Exception as e:
-        st.error(f"發生未預期的錯誤: {e}")
+            tab1, tab2 = st.tabs(["🔥 站上年線 (多方)", "🧊 跌
