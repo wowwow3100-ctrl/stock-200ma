@@ -7,7 +7,7 @@ from datetime import datetime
 import plotly.graph_objects as go
 
 # --- 1. 網頁設定 ---
-VER = "ver1.4"
+VER = "ver1.5"
 st.set_page_config(page_title=f"旺來戰法過濾器({VER})", layout="wide")
 
 # --- 2. 核心功能區 ---
@@ -55,7 +55,7 @@ def fetch_all_data(stock_dict, progress_bar, status_text):
     for i, batch_idx in enumerate(range(0, len(all_tickers), BATCH_SIZE)):
         batch = all_tickers[batch_idx : batch_idx + BATCH_SIZE]
         try:
-            # 修改 1: 明確指定 interval="1d" (日K)
+            # 必須抓取足夠歷史資料以計算均線和回測
             data = yf.download(batch, period="1y", interval="1d", progress=False, auto_adjust=False)
             if not data.empty:
                 try:
@@ -72,20 +72,46 @@ def fetch_all_data(stock_dict, progress_bar, status_text):
                     df_l = df_l.to_frame(name=batch[0])
                     df_v = df_v.to_frame(name=batch[0])
 
-                ma200_series = df_c.rolling(window=200).mean().iloc[-1]
+                # 計算 200MA 序列 (整批運算)
+                ma200_df = df_c.rolling(window=200).mean()
+
+                # 取最後一天的各項數據
                 last_price_series = df_c.iloc[-1]
+                last_ma200_series = ma200_df.iloc[-1]
                 last_vol_series = df_v.iloc[-1]
                 prev_vol_series = df_v.iloc[-2]
+
+                # 取過去 8 天的資料 (今天 + 前 7 天) 用來判斷開寶箱
+                recent_close_df = df_c.iloc[-8:]
+                recent_ma200_df = ma200_df.iloc[-8:]
 
                 for ticker in df_c.columns:
                     try:
                         price = last_price_series[ticker]
-                        ma200 = ma200_series[ticker]
+                        ma200 = last_ma200_series[ticker]
                         vol = last_vol_series[ticker]
                         prev_vol = prev_vol_series[ticker]
                         
                         if pd.isna(price) or pd.isna(ma200) or ma200 == 0: continue
 
+                        # --- 開寶箱邏輯判定 ---
+                        is_treasure = False
+                        # 取得該股過去 8 天的收盤與均線
+                        my_recent_c = recent_close_df[ticker]
+                        my_recent_ma = recent_ma200_df[ticker]
+                        
+                        if len(my_recent_c) >= 8:
+                            # 1. 今天必須站上年線
+                            cond_today_up = my_recent_c.iloc[-1] > my_recent_ma.iloc[-1]
+                            # 2. 過去 7 天 (不含今天) 至少有一天跌破年線
+                            past_c = my_recent_c.iloc[:-1]
+                            past_ma = my_recent_ma.iloc[:-1]
+                            cond_past_down = (past_c < past_ma).any()
+                            
+                            if cond_today_up and cond_past_down:
+                                is_treasure = True
+
+                        # KD 計算
                         stock_df = pd.DataFrame({'Close': df_c[ticker], 'High': df_h[ticker], 'Low': df_l[ticker]}).dropna()
                         k_val, d_val = 0, 0
                         if len(stock_df) >= 9:
@@ -107,7 +133,8 @@ def fetch_all_data(stock_dict, progress_bar, status_text):
                             '昨日成交量': int(prev_vol),
                             'K值': float(k_val),
                             'D值': float(d_val),
-                            '位置': "🟢年線上" if price >= ma200 else "🔴年線下"
+                            '位置': "🟢年線上" if price >= ma200 else "🔴年線下",
+                            '開寶箱': is_treasure  # 新增欄位
                         })
                     except: continue
         except: pass
@@ -119,24 +146,11 @@ def fetch_all_data(stock_dict, progress_bar, status_text):
     return pd.DataFrame(raw_data_list)
 
 def plot_stock_chart(ticker, name):
-    """繪製標準日 K 線圖 (ver1.4修復版)"""
     try:
-        # 修改 2: 明確下載日資料 (1d)
         df = yf.download(ticker, period="1y", interval="1d", progress=False, auto_adjust=False)
-        
-        # 修改 3: 移除時區資訊 (Fix timezone issue)
-        # 這一步很重要，避免 Plotly 把時間軸搞混
-        if df.index.tz is not None:
-            df.index = df.index.tz_localize(None)
-
-        # 簡單資料清洗
-        df = df[df['Volume'] > 0]
-        df = df.dropna()
-
-        # 將日期轉為字串格式 (YYYY-MM-DD)，強制 Plotly 使用「類別」模式繪圖
-        # 這樣假日就會自動完全消失，不會有空隙
+        if df.index.tz is not None: df.index = df.index.tz_localize(None)
+        df = df[df['Volume'] > 0].dropna()
         df['DateStr'] = df.index.strftime('%Y-%m-%d')
-
         if df.empty:
             st.error("無法取得有效數據")
             return
@@ -145,47 +159,19 @@ def plot_stock_chart(ticker, name):
         df['20MA'] = df['Close'].rolling(window=20).mean()
 
         fig = go.Figure()
-
-        # K線圖 (使用台股紅漲綠跌配色)
         fig.add_trace(go.Candlestick(
-            x=df['DateStr'], # 使用字串當 X 軸
-            open=df['Open'], high=df['High'],
-            low=df['Low'], close=df['Close'],
-            name='日K',
-            increasing_line_color='red', 
-            decreasing_line_color='green'
+            x=df['DateStr'], open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'],
+            name='日K', increasing_line_color='red', decreasing_line_color='green'
         ))
-
-        # 200MA
-        fig.add_trace(go.Scatter(
-            x=df['DateStr'], y=df['200MA'],
-            line=dict(color='orange', width=2),
-            name='200MA (年線)'
-        ))
-
-        # 20MA
-        fig.add_trace(go.Scatter(
-            x=df['DateStr'], y=df['20MA'],
-            line=dict(color='skyblue', width=1),
-            name='20MA (月線)'
-        ))
+        fig.add_trace(go.Scatter(x=df['DateStr'], y=df['200MA'], line=dict(color='orange', width=2), name='200MA (年線)'))
+        fig.add_trace(go.Scatter(x=df['DateStr'], y=df['20MA'], line=dict(color='skyblue', width=1), name='20MA (月線)'))
 
         fig.update_layout(
-            title=f"📊 {name} ({ticker}) 日K線圖",
-            yaxis_title='股價',
-            xaxis_rangeslider_visible=False,
-            height=600,
-            hovermode="x unified",
-            xaxis=dict(
-                type='category', # 強制設定為類別，完全消除假日空隙
-                tickangle=-45,   # 日期斜著放比較不擠
-                nticks=20        # 不要顯示太多日期標籤
-            )
+            title=f"📊 {name} ({ticker}) 日K線圖", yaxis_title='股價', height=600, hovermode="x unified",
+            xaxis=dict(type='category', tickangle=-45, nticks=20), xaxis_rangeslider_visible=False
         )
         st.plotly_chart(fig, use_container_width=True)
-        
-    except Exception as e:
-        st.error(f"繪圖失敗: {e}")
+    except Exception as e: st.error(f"繪圖失敗: {e}")
 
 # --- 3. 介面顯示區 ---
 st.title(f"🍍 {VER} 旺來戰法過濾器")
@@ -215,7 +201,12 @@ with st.sidebar:
     st.header("2. 即時篩選器")
     bias_threshold = st.slider("乖離率範圍 (±%)", 0.5, 5.0, 2.5, step=0.1)
     min_vol_input = st.number_input("最低成交量 (張)", value=1000, step=100)
+    
     st.subheader("進階條件")
+    # --- 新增按鈕 ---
+    filter_treasure = st.checkbox("🎁 開寶箱 (跌破年線7日內站回)", value=False)
+    st.caption("🔍 尋找假跌破後迅速拉回的強勢股")
+    
     filter_kd = st.checkbox("KD 黃金交叉 (K > D)", value=False)
     filter_vol_double = st.checkbox("爆量 (今日 > 昨日x2)", value=False)
     filter_ma_up = st.checkbox("只看站上年線 (多方)", value=False)
@@ -223,28 +214,32 @@ with st.sidebar:
     st.divider()
     with st.expander("📅 版本開發紀錄"):
         st.markdown("""
+        **Ver 1.5 (Treasure Hunt)**
+        - 新增策略：**開寶箱戰法**。自動偵測「過去7日曾跌破年線，但今日站上年線」的股票。
+        
         **Ver 1.4 (Daily Chart Fix)**
-        - 圖表修正：強制指定「日(1d)」資料頻率。
-        - 顯示優化：移除時區干擾，X軸改為類別模式，假日完全消失，K棒飽滿。
-
-        **Ver 1.3 (Stability)**
-        - 修正篩選結果為 0 時的錯誤。
+        - 圖表修正：強制指定「日(1d)」資料頻率，移除假日空缺。
         """)
 
 # 主畫面
 if st.session_state['master_df'] is not None:
     df = st.session_state['master_df'].copy()
     
-    # 篩選
+    # 1. 基礎篩選
     df = df[df['abs_bias'] <= bias_threshold]
     df = df[df['成交量'] >= (min_vol_input * 1000)]
+    
+    # 2. 開寶箱篩選 (如果勾選，就只留寶箱股)
+    if filter_treasure:
+        df = df[df['開寶箱'] == True]
+        
+    # 3. 其他篩選
     if filter_kd: df = df[df['K值'] > df['D值']]
     if filter_vol_double: df = df[df['成交量'] > (df['昨日成交量'] * 2)]
     if filter_ma_up: df = df[df['位置'] == "🟢年線上"]
 
-    # 安全檢查
     if len(df) == 0:
-        st.warning(f"⚠️ 找不到符合條件的股票！\n\n請嘗試放寬乖離率 (目前 {bias_threshold}%) 或其他條件。")
+        st.warning(f"⚠️ 找不到符合條件的股票！\n\n如果勾選了「開寶箱」，代表最近沒有股票出現這種「假跌破」型態，或者是乖離率範圍設太小了。")
     else:
         st.markdown(f"""
         <div style="background-color: #f0f2f6; padding: 15px; border-radius: 10px; text-align: center; border: 2px solid #ff4b4b;">
@@ -253,13 +248,17 @@ if st.session_state['master_df'] is not None:
         <br>
         """, unsafe_allow_html=True)
         
-        # 整理
         df['成交量(張)'] = (df['成交量'] / 1000).astype(int)
         df['KD值'] = df.apply(lambda x: f"K:{int(x['K值'])} D:{int(x['D值'])}", axis=1)
         df['選股標籤'] = df['代號'] + " " + df['名稱']
         
+        # 顯示欄位加入「開寶箱」標記(如果有勾的話)
         display_cols = ['代號', '名稱', '收盤價', '成交量(張)', '乖離率(%)', '位置', 'KD值']
-        df = df.sort_values(by='abs_bias')
+        if filter_treasure:
+             # 如果是開寶箱模式，我們把乖離率排序改為成交量排序，看誰量大
+             df = df.sort_values(by='成交量', ascending=False)
+        else:
+             df = df.sort_values(by='abs_bias')
         
         tab1, tab2 = st.tabs(["📋 篩選結果列表", "📊 日K線技術分析"])
         
@@ -277,7 +276,7 @@ if st.session_state['master_df'] is not None:
             )
 
         with tab2:
-            st.markdown("### 🔍 個股日K線圖 (包含年線/月線)")
+            st.markdown("### 🔍 個股日K線圖")
             if len(df) > 0:
                 selected_stock_label = st.selectbox("請選擇一檔股票：", df['選股標籤'].tolist())
                 selected_row = df[df['選股標籤'] == selected_stock_label].iloc[0]
