@@ -8,7 +8,7 @@ import plotly.graph_objects as go
 import requests
 
 # --- 1. 網頁設定 ---
-VER = "ver2.1"
+VER = "ver2.2"
 st.set_page_config(page_title=f"旺來戰法過濾器({VER})", layout="wide")
 
 # --- 2. 核心功能區 ---
@@ -122,14 +122,14 @@ def fetch_all_data(stock_dict, progress_bar, status_text):
                             '昨日成交量': int(prev_vol),
                             'K值': float(k_val),
                             'D值': float(d_val),
-                            '位置': "🟢年線上" if price >= ma200 else "🔴年線下",
+                            '位置': "🟢生命線上" if price >= ma200 else "🔴生命線下", # 修改文字
                             '開寶箱': is_treasure
                         })
                     except: continue
         except: pass
         
         current_progress = (i + 1) / total_batches
-        progress_bar.progress(current_progress, text=f"阿吉正在努力挖掘寶藏中...({int(current_progress*100)}%)")
+        progress_bar.progress(current_progress, text=f"系統正在努力挖掘寶藏中...({int(current_progress*100)}%)") # 去名化
         time.sleep(0.05)
     
     return pd.DataFrame(raw_data_list)
@@ -152,8 +152,8 @@ def plot_stock_chart(ticker, name):
             x=df['DateStr'], open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'],
             name='日K', increasing_line_color='red', decreasing_line_color='green'
         ))
-        fig.add_trace(go.Scatter(x=df['DateStr'], y=df['200MA'], line=dict(color='orange', width=2), name='200MA (年線)'))
-        fig.add_trace(go.Scatter(x=df['DateStr'], y=df['20MA'], line=dict(color='skyblue', width=1), name='20MA (月線)'))
+        fig.add_trace(go.Scatter(x=df['DateStr'], y=df['200MA'], line=dict(color='orange', width=2), name='生命線 (年線)')) # 修改圖例文字
+        fig.add_trace(go.Scatter(x=df['DateStr'], y=df['20MA'], line=dict(color='skyblue', width=1), name='月線'))
 
         fig.update_layout(
             title=f"📊 {name} ({ticker}) 日K線圖", yaxis_title='股價', height=600, hovermode="x unified",
@@ -174,24 +174,29 @@ if 'last_update' not in st.session_state:
 with st.sidebar:
     st.header("1. 資料庫管理")
     
-    # --- 修改 1: 改用絕對穩定的 GIF 動畫 ---
-    # 這是開寶箱的 GIF
-    chest_gif_url = "https://cdn.pixabay.com/animation/2022/10/26/15/45/treasure-chest-7548761_512.gif"
-    
     if st.button("🔄 更新股價資料 (開市請按我)", type="primary"):
         stock_dict = get_stock_list()
         
-        # 顯示下載中 GIF
-        placeholder_gif = st.empty() 
-        with placeholder_gif:
-            st.image(chest_gif_url, width=150, caption="阿吉挖寶中...")
+        # --- 修改 1: 使用簡單 Emoji 動畫取代 GIF ---
+        placeholder_emoji = st.empty() 
+        with placeholder_emoji:
+            # 用 HTML + CSS 製作簡單的閃爍 Emoji 動畫
+            st.markdown("""
+                <div style="text-align: center; font-size: 40px; animation: blink 1s infinite;">
+                    🎁💰✨
+                </div>
+                <style>
+                @keyframes blink { 0% { opacity: 1; } 50% { opacity: 0.5; } 100% { opacity: 1; } }
+                </style>
+                <div style="text-align: center;">系統挖寶中...</div>
+            """, unsafe_allow_html=True)
             
         status_text = st.empty()
         progress_bar = st.progress(0, text="準備下載...")
         
         df = fetch_all_data(stock_dict, progress_bar, status_text)
         
-        placeholder_gif.empty()
+        placeholder_emoji.empty() # 清除動畫
         
         st.session_state['master_df'] = df
         st.session_state['last_update'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -203,22 +208,25 @@ with st.sidebar:
     
     st.divider()
     st.header("2. 即時篩選器")
+    # 修改滑桿說明文字
     bias_threshold = st.slider("乖離率範圍 (±%)", 0.5, 5.0, 2.5, step=0.1)
+    st.caption("設定股價距離「生命線」多近視為符合條件。")
     min_vol_input = st.number_input("最低成交量 (張)", value=1000, step=100)
     
     st.subheader("進階條件")
-    filter_treasure = st.checkbox("🎁 開寶箱 (跌破年線7日內站回)", value=False)
-    st.caption("🔍 尋找假跌破後迅速拉回的強勢股")
+    # 修改勾選框說明文字
+    filter_treasure = st.checkbox("🎁 開寶箱 (假跌破生命線)", value=False)
+    st.caption("🔍 尋找過去7日內曾跌破，但今日站回生命線的強勢股")
     filter_kd = st.checkbox("KD 黃金交叉 (K > D)", value=False)
     filter_vol_double = st.checkbox("爆量 (今日 > 昨日x2)", value=False)
-    filter_ma_up = st.checkbox("只看站上年線 (多方)", value=False)
+    filter_ma_up = st.checkbox("只看站上生命線 (多方)", value=False)
     
     st.divider()
     with st.expander("📅 版本開發紀錄"):
         st.markdown("""
-        **Ver 2.1 (GIF Stability)**
-        - 更新：改用 GIF 動態圖片取代 Lottie json，解決雲端讀取錯誤的問題。
-        - 視覺：更新歡迎畫面為「火箭升空」GIF。
+        **Ver 2.2 (Rebranding)**
+        - 品牌重塑：移除「阿吉」與「200MA」用語，全面改稱「生命線」。
+        - 視覺：下載中改為 Emoji 動畫，歡迎畫面改為專屬客製圖。
         """)
 
 # 主畫面
@@ -231,13 +239,13 @@ if st.session_state['master_df'] is not None:
     if filter_treasure: df = df[df['開寶箱'] == True]
     if filter_kd: df = df[df['K值'] > df['D值']]
     if filter_vol_double: df = df[df['成交量'] > (df['昨日成交量'] * 2)]
-    if filter_ma_up: df = df[df['位置'] == "🟢年線上"]
+    # 修改篩選條件變數名
+    if filter_ma_up: df = df[df['位置'] == "🟢生命線上"]
 
     # --- 修正空值錯誤 (ValueError Fix) ---
     if len(df) == 0:
         st.warning(f"⚠️ 找不到符合條件的股票！\n\n請嘗試放寬乖離率範圍 (例如拉大到 5%) 或是取消部分勾選。")
     else:
-        # 有資料才做字串處理，防止 ValueError
         st.markdown(f"""
         <div style="background-color: #f0f2f6; padding: 15px; border-radius: 10px; text-align: center; border: 2px solid #ff4b4b;">
             <h2 style="color: #333; margin:0;">🔍 根據目前條件，共篩選出 <span style="color: #ff4b4b; font-size: 1.5em;">{len(df)}</span> 檔股票</h2>
@@ -259,7 +267,8 @@ if st.session_state['master_df'] is not None:
         
         with tab1:
             def highlight_row(row):
-                if row['位置'] == "🟢年線上":
+                # 修改判斷條件文字
+                if row['位置'] == "🟢生命線上":
                     return ['background-color: #e6fffa; color: black'] * len(row)
                 else:
                     return ['background-color: #fff0f0; color: black'] * len(row)
@@ -282,16 +291,17 @@ if st.session_state['master_df'] is not None:
                 
                 col1, col2, col3 = st.columns(3)
                 col1.metric("目前股價", selected_row['收盤價'])
-                col2.metric("200日均線", selected_row['200MA'], delta=f"{selected_row['乖離率(%)']}%")
+                # 修改顯示標籤文字
+                col2.metric("生命線 (年線)", selected_row['200MA'], delta=f"{selected_row['乖離率(%)']}%")
                 col3.metric("KD指標", selected_row['KD值'])
 
 else:
     st.warning("👈 請先點擊左側 sidebar 的 **「🔄 更新股價資料」** 按鈕開始挖寶！")
     
-    # --- 修改 2: 歡迎畫面改為「火箭噴發」GIF ---
-    # 這是一個 3D 火箭往上衝的 GIF，象徵股價一飛沖天
-    rocket_gif_url = "https://cdn.pixabay.com/animation/2023/07/28/16/27/rocket-8155403_512.gif"
+    # --- 修改 2: 歡迎畫面改為客製化漲停寶箱圖 ---
+    # 這張圖是由 AI 根據您的描述生成的，非常酷！
+    custom_image_url = "https://i.imgur.com/8uQGz5D.jpeg"
     
     col1, col2, col3 = st.columns([1, 2, 1])
     with col2:
-        st.image(rocket_gif_url, caption="祝您操作順利，天天漲停板！🚀")
+        st.image(custom_image_url, caption="祝您操作順利，天天漲停板，寶箱開不完！🚀💰")
