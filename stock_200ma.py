@@ -7,7 +7,7 @@ from datetime import datetime
 import plotly.graph_objects as go
 
 # --- 1. 網頁設定 ---
-VER = "ver1.3"
+VER = "ver1.4"
 st.set_page_config(page_title=f"旺來戰法過濾器({VER})", layout="wide")
 
 # --- 2. 核心功能區 ---
@@ -55,7 +55,8 @@ def fetch_all_data(stock_dict, progress_bar, status_text):
     for i, batch_idx in enumerate(range(0, len(all_tickers), BATCH_SIZE)):
         batch = all_tickers[batch_idx : batch_idx + BATCH_SIZE]
         try:
-            data = yf.download(batch, period="1y", progress=False, auto_adjust=False)
+            # 修改 1: 明確指定 interval="1d" (日K)
+            data = yf.download(batch, period="1y", interval="1d", progress=False, auto_adjust=False)
             if not data.empty:
                 try:
                     df_c = data['Close']
@@ -118,14 +119,26 @@ def fetch_all_data(stock_dict, progress_bar, status_text):
     return pd.DataFrame(raw_data_list)
 
 def plot_stock_chart(ticker, name):
-    """繪製優化版 K 線圖"""
+    """繪製標準日 K 線圖 (ver1.4修復版)"""
     try:
-        df = yf.download(ticker, period="1y", progress=False, auto_adjust=False)
+        # 修改 2: 明確下載日資料 (1d)
+        df = yf.download(ticker, period="1y", interval="1d", progress=False, auto_adjust=False)
+        
+        # 修改 3: 移除時區資訊 (Fix timezone issue)
+        # 這一步很重要，避免 Plotly 把時間軸搞混
+        if df.index.tz is not None:
+            df.index = df.index.tz_localize(None)
+
+        # 簡單資料清洗
         df = df[df['Volume'] > 0]
         df = df.dropna()
 
+        # 將日期轉為字串格式 (YYYY-MM-DD)，強制 Plotly 使用「類別」模式繪圖
+        # 這樣假日就會自動完全消失，不會有空隙
+        df['DateStr'] = df.index.strftime('%Y-%m-%d')
+
         if df.empty:
-            st.error("無法取得有效數據，可能是近期無交易。")
+            st.error("無法取得有效數據")
             return
 
         df['200MA'] = df['Close'].rolling(window=200).mean()
@@ -133,35 +146,40 @@ def plot_stock_chart(ticker, name):
 
         fig = go.Figure()
 
+        # K線圖 (使用台股紅漲綠跌配色)
         fig.add_trace(go.Candlestick(
-            x=df.index,
+            x=df['DateStr'], # 使用字串當 X 軸
             open=df['Open'], high=df['High'],
             low=df['Low'], close=df['Close'],
-            name='K線',
+            name='日K',
             increasing_line_color='red', 
             decreasing_line_color='green'
         ))
 
+        # 200MA
         fig.add_trace(go.Scatter(
-            x=df.index, y=df['200MA'],
+            x=df['DateStr'], y=df['200MA'],
             line=dict(color='orange', width=2),
             name='200MA (年線)'
         ))
 
+        # 20MA
         fig.add_trace(go.Scatter(
-            x=df.index, y=df['20MA'],
+            x=df['DateStr'], y=df['20MA'],
             line=dict(color='skyblue', width=1),
             name='20MA (月線)'
         ))
 
         fig.update_layout(
-            title=f"📊 {name} ({ticker}) 技術分析",
+            title=f"📊 {name} ({ticker}) 日K線圖",
             yaxis_title='股價',
             xaxis_rangeslider_visible=False,
             height=600,
             hovermode="x unified",
             xaxis=dict(
-                rangebreaks=[dict(bounds=["sat", "mon"])]
+                type='category', # 強制設定為類別，完全消除假日空隙
+                tickangle=-45,   # 日期斜著放比較不擠
+                nticks=20        # 不要顯示太多日期標籤
             )
         )
         st.plotly_chart(fig, use_container_width=True)
@@ -205,15 +223,12 @@ with st.sidebar:
     st.divider()
     with st.expander("📅 版本開發紀錄"):
         st.markdown("""
+        **Ver 1.4 (Daily Chart Fix)**
+        - 圖表修正：強制指定「日(1d)」資料頻率。
+        - 顯示優化：移除時區干擾，X軸改為類別模式，假日完全消失，K棒飽滿。
+
         **Ver 1.3 (Stability)**
-        - 新增：篩選結果為 0 時的安全檢查，防止程式崩潰。
-        
-        **Ver 1.2 (Visual Upgrade)**
-        - 介面優化：新增醒目篩選統計看板。
-        - 列表優化：年線上/下改為整列背景色區分。
-        
-        **Ver 1.1 (Chart Upgrade)**
-        - 新增個股 K 線圖與 200MA 視覺化分析。
+        - 修正篩選結果為 0 時的錯誤。
         """)
 
 # 主畫面
@@ -227,11 +242,10 @@ if st.session_state['master_df'] is not None:
     if filter_vol_double: df = df[df['成交量'] > (df['昨日成交量'] * 2)]
     if filter_ma_up: df = df[df['位置'] == "🟢年線上"]
 
-    # --- 關鍵修正：檢查是否為空 ---
+    # 安全檢查
     if len(df) == 0:
-        st.warning(f"⚠️ 找不到符合條件的股票！\n\n目前的篩選條件可能太嚴格了 (例如乖離率 {bias_threshold}% 太小)。\n請嘗試放寬條件，或是取消部分勾選框。")
+        st.warning(f"⚠️ 找不到符合條件的股票！\n\n請嘗試放寬乖離率 (目前 {bias_threshold}%) 或其他條件。")
     else:
-        # 有資料才執行顯示與運算
         st.markdown(f"""
         <div style="background-color: #f0f2f6; padding: 15px; border-radius: 10px; text-align: center; border: 2px solid #ff4b4b;">
             <h2 style="color: #333; margin:0;">🔍 根據目前條件，共篩選出 <span style="color: #ff4b4b; font-size: 1.5em;">{len(df)}</span> 檔股票</h2>
@@ -239,7 +253,7 @@ if st.session_state['master_df'] is not None:
         <br>
         """, unsafe_allow_html=True)
         
-        # 整理顯示
+        # 整理
         df['成交量(張)'] = (df['成交量'] / 1000).astype(int)
         df['KD值'] = df.apply(lambda x: f"K:{int(x['K值'])} D:{int(x['D值'])}", axis=1)
         df['選股標籤'] = df['代號'] + " " + df['名稱']
@@ -247,7 +261,7 @@ if st.session_state['master_df'] is not None:
         display_cols = ['代號', '名稱', '收盤價', '成交量(張)', '乖離率(%)', '位置', 'KD值']
         df = df.sort_values(by='abs_bias')
         
-        tab1, tab2 = st.tabs(["📋 篩選結果列表", "📊 K線技術分析"])
+        tab1, tab2 = st.tabs(["📋 篩選結果列表", "📊 日K線技術分析"])
         
         with tab1:
             def highlight_row(row):
@@ -263,9 +277,9 @@ if st.session_state['master_df'] is not None:
             )
 
         with tab2:
-            st.markdown("### 🔍 個股詳細技術分析")
+            st.markdown("### 🔍 個股日K線圖 (包含年線/月線)")
             if len(df) > 0:
-                selected_stock_label = st.selectbox("請選擇一檔股票查看圖表：", df['選股標籤'].tolist())
+                selected_stock_label = st.selectbox("請選擇一檔股票：", df['選股標籤'].tolist())
                 selected_row = df[df['選股標籤'] == selected_stock_label].iloc[0]
                 target_ticker = selected_row['完整代號']
                 target_name = selected_row['名稱']
