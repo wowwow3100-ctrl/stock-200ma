@@ -8,7 +8,7 @@ import plotly.graph_objects as go
 import requests
 
 # --- 1. 網頁設定 ---
-VER = "ver3.1"
+VER = "ver3.2"
 st.set_page_config(page_title=f"🍍 旺來-台股生命線({VER})", layout="wide")
 
 # --- 2. 核心功能區 ---
@@ -50,7 +50,7 @@ def calculate_kd_values(df, n=9):
     except:
         return 50, 50
 
-# --- 策略回測核心函數 (新增月份分組與股名) ---
+# --- 策略回測核心函數 ---
 def run_strategy_backtest(stock_dict, progress_bar):
     results = []
     all_tickers = list(stock_dict.keys())
@@ -77,7 +77,7 @@ def run_strategy_backtest(stock_dict, progress_bar):
                     df_h = df_h.to_frame(name=batch[0])
 
                 ma200_df = df_c.rolling(window=200).mean()
-                scan_window = df_c.index[-90:-10] # 擴大掃描範圍至近3個月 (涵蓋9,10,11月)
+                scan_window = df_c.index[-90:-10] 
                 
                 for ticker in df_c.columns:
                     try:
@@ -87,7 +87,6 @@ def run_strategy_backtest(stock_dict, progress_bar):
                         h_series = df_h[ticker]
                         ma_series = ma200_df[ticker]
                         
-                        # 取得股名
                         stock_name = stock_dict.get(ticker, {}).get('name', ticker)
                         
                         for date in scan_window:
@@ -105,7 +104,6 @@ def run_strategy_backtest(stock_dict, progress_bar):
                             
                             if ma_val == 0 or prev_vol == 0: continue
 
-                            # 策略：接近 + 出量(1.5) + 站上 + 生命線向上
                             cond_near = (low_p <= ma_val * 1.03) and (low_p >= ma_val * 0.90) 
                             cond_vol = (vol > prev_vol * 1.5)
                             cond_up = (close_p > ma_val)
@@ -116,7 +114,6 @@ def run_strategy_backtest(stock_dict, progress_bar):
                                 max_price = future_highs.max()
                                 max_profit_pct = (max_price - close_p) / close_p * 100
                                 
-                                # 為了分組，我們需要月份
                                 month_str = date.strftime('%m月')
                                 
                                 is_win = max_profit_pct >= 3.0
@@ -124,7 +121,7 @@ def run_strategy_backtest(stock_dict, progress_bar):
                                 results.append({
                                     '月份': month_str,
                                     '代號': ticker.replace(".TW", "").replace(".TWO", ""),
-                                    '名稱': stock_name, # 新增股名
+                                    '名稱': stock_name,
                                     '訊號日期': date.strftime('%Y-%m-%d'),
                                     '訊號價': round(close_p, 2),
                                     '最高漲幅(%)': round(max_profit_pct, 2),
@@ -218,7 +215,7 @@ def fetch_all_data(stock_dict, progress_bar, status_text):
                             '名稱': stock_info['name'],
                             '完整代號': ticker,
                             '收盤價': float(price),
-                            '生命線': float(ma200), # 欄位正名
+                            '生命線': float(ma200),
                             '生命線趨勢': ma_trend,
                             '乖離率(%)': float(bias),
                             'abs_bias': abs(float(bias)),
@@ -280,32 +277,42 @@ if 'backtest_result' not in st.session_state:
 with st.sidebar:
     st.header("1. 資料庫管理")
     
+    # 強制重置快取按鈕 (修復卡住問題)
+    if st.button("🚨 強制重置系統 (卡住請按我)"):
+        st.cache_data.clear()
+        st.session_state.clear()
+        st.success("系統已重置！請重新點擊更新股價。")
+        st.rerun()
+
     if st.button("🔄 更新股價資料 (開市請按我)", type="primary"):
         stock_dict = get_stock_list()
         
-        placeholder_emoji = st.empty() 
-        with placeholder_emoji:
-            st.markdown("""
-                <div style="text-align: center; font-size: 40px; animation: blink 1s infinite;">
-                    🎁💰✨
-                </div>
-                <style>
-                @keyframes blink { 0% { opacity: 1; } 50% { opacity: 0.5; } 100% { opacity: 1; } }
-                </style>
-                <div style="text-align: center;">正在開鎖寶箱...</div>
-            """, unsafe_allow_html=True)
+        if not stock_dict:
+            st.error("無法取得股票清單，請稍後再試或按上方重置按鈕。")
+        else:
+            placeholder_emoji = st.empty() 
+            with placeholder_emoji:
+                st.markdown("""
+                    <div style="text-align: center; font-size: 40px; animation: blink 1s infinite;">
+                        🎁💰✨
+                    </div>
+                    <style>
+                    @keyframes blink { 0% { opacity: 1; } 50% { opacity: 0.5; } 100% { opacity: 1; } }
+                    </style>
+                    <div style="text-align: center;">正在開鎖寶箱...</div>
+                """, unsafe_allow_html=True)
             
-        status_text = st.empty()
-        progress_bar = st.progress(0, text="準備下載...")
-        
-        df = fetch_all_data(stock_dict, progress_bar, status_text)
-        
-        placeholder_emoji.empty()
-        
-        st.session_state['master_df'] = df
-        st.session_state['last_update'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        progress_bar.empty()
-        st.success(f"更新完成！共 {len(df)} 檔資料")
+            status_text = st.empty()
+            progress_bar = st.progress(0, text="準備下載...")
+            
+            df = fetch_all_data(stock_dict, progress_bar, status_text)
+            
+            placeholder_emoji.empty()
+            
+            st.session_state['master_df'] = df
+            st.session_state['last_update'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            progress_bar.empty()
+            st.success(f"更新完成！共 {len(df)} 檔資料")
         
     if st.session_state['last_update']:
         st.caption(f"最後更新：{st.session_state['last_update']}")
@@ -344,6 +351,10 @@ with st.sidebar:
 
     with st.expander("📅 版本開發紀錄"):
         st.markdown("""
+        **Ver 3.2 (Image & DB Fix)**
+        - 修復：歡迎畫面圖片連結更新，解決無法顯示問題。
+        - 系統：加入強制重置按鈕，解決舊資料卡住導致的錯誤。
+
         **Ver 3.1 (War Room Edition)**
         - 回測升級：新增「按月分組」功能 (9月/10月/11月)，並顯示股名。
         - 介面優化：修正篩選邏輯，避免無效操作。
@@ -357,13 +368,10 @@ if st.session_state['backtest_result'] is not None:
     st.subheader("🧪 策略回測報告 (歷史訊號驗證)")
     
     if len(bt_df) > 0:
-        # 取得所有月份清單
         months = sorted(bt_df['月份'].unique())
         
-        # 建立分頁: 總覽 + 各月份
         tabs = st.tabs(["📊 總覽"] + months)
         
-        # --- 總覽頁面 ---
         with tabs[0]:
             win_count = len(bt_df[bt_df['結果'].str.contains("Win")])
             total_count = len(bt_df)
@@ -376,7 +384,6 @@ if st.session_state['backtest_result'] is not None:
             col3.metric("總平均最高漲幅", f"{avg_max_ret}%")
             st.dataframe(bt_df, use_container_width=True)
 
-        # --- 各月份頁面 ---
         for i, m in enumerate(months):
             with tabs[i+1]:
                 m_df = bt_df[bt_df['月份'] == m]
@@ -412,10 +419,9 @@ if st.session_state['master_df'] is not None:
     df = df[df['abs_bias'] <= bias_threshold]
     df = df[df['成交量'] >= (min_vol_input * 1000)]
     
-    # 趨勢篩選 (修正邏輯：分開處理，若同時勾選則顯示警告)
     if filter_trend_up and filter_trend_down:
         st.error("❌ 請勿同時勾選「生命線向上」與「生命線向下」，這兩個條件是互斥的！")
-        df = df[0:0] # 清空
+        df = df[0:0] 
     elif filter_trend_up:
         df = df[df['生命線趨勢'] == "⬆️向上"]
     elif filter_trend_down:
@@ -482,7 +488,8 @@ if st.session_state['master_df'] is not None:
 else:
     st.warning("👈 請先點擊左側 sidebar 的 **「🔄 更新股價資料」** 按鈕開始挖寶！")
     
-    custom_image_url = "https://i.imgur.com/8uQGz5D.jpeg"
+    # 這裡換上新的穩定圖片連結
+    custom_image_url = "https://images.unsplash.com/photo-1611974765270-ca1258634369?ixlib=rb-4.0.3&auto=format&fit=crop&w=1000&q=80"
     col1, col2, col3 = st.columns([1, 2, 1])
     with col2:
         st.image(custom_image_url, caption="祝您操作順利，天天漲停板，寶箱開不完！🚀💰")
