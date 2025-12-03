@@ -8,7 +8,7 @@ import plotly.graph_objects as go
 import requests
 
 # --- 1. 網頁設定 ---
-VER = "ver2.7"
+VER = "ver2.9"
 st.set_page_config(page_title=f"🍍 旺來-台股生命線({VER})", layout="wide")
 
 # --- 2. 核心功能區 ---
@@ -49,17 +49,21 @@ def calculate_kd_values(df, n=9):
 
 # --- 策略回測核心函數 ---
 def run_strategy_backtest(stock_dict, progress_bar):
-    """回測：接近生命線+爆量+站上，兩週後的表現"""
+    """
+    回測邏輯修正：
+    1. 資料範圍：2 年
+    2. 條件微調：出量標準改為 1.5 倍 (出量)
+    """
     results = []
     all_tickers = list(stock_dict.keys())
-    # 為了演示速度，這邊設定批次跑
     BATCH_SIZE = 50 
     total_batches = (len(all_tickers) // BATCH_SIZE) + 1
     
     for i, batch_idx in enumerate(range(0, len(all_tickers), BATCH_SIZE)):
         batch = all_tickers[batch_idx : batch_idx + BATCH_SIZE]
         try:
-            data = yf.download(batch, period="6mo", interval="1d", progress=False, auto_adjust=False)
+            # 必須抓 2 年才能算出 200MA 並往前推算
+            data = yf.download(batch, period="2y", interval="1d", progress=False, auto_adjust=False)
             if not data.empty:
                 try:
                     df_c = data['Close']
@@ -74,7 +78,9 @@ def run_strategy_backtest(stock_dict, progress_bar):
                     df_l = df_l.to_frame(name=batch[0])
 
                 ma200_df = df_c.rolling(window=200).mean()
-                scan_window = df_c.index[-60:-10] # 掃描區間
+                
+                # 掃描區間：過去 60 天 ~ 過去 10 天
+                scan_window = df_c.index[-60:-10] 
                 
                 for ticker in df_c.columns:
                     try:
@@ -93,11 +99,14 @@ def run_strategy_backtest(stock_dict, progress_bar):
                             prev_vol = v_series.iloc[idx-1]
                             ma_val = ma_series.iloc[idx]
                             
-                            if ma_val == 0: continue
+                            if ma_val == 0 or prev_vol == 0: continue
 
-                            # 策略：1.接近 2.爆量 3.站上
-                            cond_near = (low_p <= ma_val * 1.02) and (low_p >= ma_val * 0.90) 
-                            cond_vol = (vol > prev_vol * 2)
+                            # --- 策略條件 (修正為 1.5 倍) ---
+                            # 1. 接近生命線
+                            cond_near = (low_p <= ma_val * 1.03) and (low_p >= ma_val * 0.90) 
+                            # 2. 出量 (大於昨日 1.5 倍)
+                            cond_vol = (vol > prev_vol * 1.5)
+                            # 3. 站上/脫離
                             cond_up = (close_p > ma_val)
                             
                             if cond_near and cond_vol and cond_up:
@@ -119,7 +128,8 @@ def run_strategy_backtest(stock_dict, progress_bar):
             pass
         
         progress = (i + 1) / total_batches
-        progress_bar.progress(progress, text=f"正在回測歷史數據...({int(progress*100)}%)")
+        # 增加文字提示
+        progress_bar.progress(progress, text=f"深度回測中 (運算量大，請稍候)...({int(progress*100)}%)")
         
     return pd.DataFrame(results)
 
@@ -189,7 +199,7 @@ def fetch_all_data(stock_dict, progress_bar, status_text):
                         raw_data_list.append({
                             '代號': stock_info['code'],
                             '名稱': stock_info['name'],
-                            '完整代號': ticker, # 這裡是關鍵！ver2.6/2.7 必須有這個
+                            '完整代號': ticker,
                             '收盤價': float(price),
                             '200MA': float(ma200),
                             '乖離率(%)': float(bias),
@@ -292,14 +302,19 @@ with st.sidebar:
     filter_treasure = st.checkbox("🎁 挖寶中 (假跌破拉回)", value=False)
     st.caption("🔍 尋找過去7日內曾跌破，但今日站回生命線的強勢股")
     filter_kd = st.checkbox("KD 黃金交叉 (K > D)", value=False)
-    filter_vol_double = st.checkbox("爆量 (今日 > 昨日x2)", value=False)
+    
+    # --- 修改條件：出量 (x1.5) ---
+    filter_vol_double = st.checkbox("出量 (今日 > 昨日x1.5)", value=False)
+    
     filter_ma_up = st.checkbox("只看站上生命線 (多方)", value=False)
     
     st.divider()
     
-    # 獨立的回測按鈕
-    if st.button("🧪 執行策略回測 (近2週表現)"):
-        st.info("正在回溯歷史數據驗證策略，這需要一點時間 (約 1-2 分鐘)，請喝口茶稍等...🍵")
+    # 策略回測按鈕 + 註記
+    st.markdown("---")
+    st.caption("⚠️ 注意：回測需調閱2年歷史資料，運算時間較長 (約2分鐘)。")
+    if st.button("🧪 策略回測 (近2週表現)"):
+        st.info("阿吉正在調閱過去2年的歷史檔案，進行深度驗證... (請稍候) ⏳")
         stock_dict = get_stock_list()
         bt_progress = st.progress(0, text="初始化回測...")
         
@@ -311,15 +326,16 @@ with st.sidebar:
 
     with st.expander("📅 版本開發紀錄"):
         st.markdown("""
-        **Ver 2.7 (Crash Proof)**
-        - 修復：自動偵測舊版資料導致的 KeyError，提示使用者更新。
+        **Ver 2.9 (Volume Relax)**
+        - 優化：將「爆量(2倍)」條件放寬為「出量(1.5倍)」，增加訊號觸發機會。
+        - 介面：新增回測執行時間較長的提示。
         """)
 
 # 主畫面
 if st.session_state['backtest_result'] is not None:
     bt_df = st.session_state['backtest_result']
     st.markdown("---")
-    st.subheader("🧪 策略回測報告 (近2個月訊號驗證)")
+    st.subheader("🧪 策略回測報告 (歷史訊號驗證)")
     
     if len(bt_df) > 0:
         win_count = len(bt_df[bt_df['兩週漲跌幅(%)'] > 0])
@@ -338,25 +354,26 @@ if st.session_state['backtest_result'] is not None:
             
         st.dataframe(bt_df.style.map(color_ret, subset=['兩週漲跌幅(%)']), use_container_width=True)
     else:
-        st.warning("在此期間內，沒有股票符合「接近生命線 + 爆量 + 站上」的嚴格條件。")
+        st.warning("在此回測期間內，沒有股票符合條件。\n(已放寬為 1.5 倍出量)")
     st.markdown("---")
 
 if st.session_state['master_df'] is not None:
     df = st.session_state['master_df'].copy()
     
-    # --- 關鍵修復：防呆機制 ---
-    # 如果發現舊版資料(沒有完整代號)，強制停止並提示更新
     if '完整代號' not in df.columns:
-        st.error("⚠️ 偵測到您的資料庫是舊版本的 (缺少圖表數據)！")
-        st.warning("👉 請點擊左側紅色的 **「🔄 更新股價資料」** 按鈕，讓阿吉幫您下載最新格式的資料，問題就會解決囉！")
-        st.stop() # 停止執行後面的程式，防止報錯
+        st.error("⚠️ 偵測到舊版資料！請點擊左側紅色的 **「🔄 更新股價資料」** 按鈕。")
+        st.stop()
 
     df = df[df['abs_bias'] <= bias_threshold]
     df = df[df['成交量'] >= (min_vol_input * 1000)]
     
     if filter_treasure: df = df[df['開寶箱'] == True]
     if filter_kd: df = df[df['K值'] > df['D值']]
-    if filter_vol_double: df = df[df['成交量'] > (df['昨日成交量'] * 2)]
+    
+    # --- 修改日常篩選邏輯：出量 x1.5 ---
+    if filter_vol_double: 
+        df = df[df['成交量'] > (df['昨日成交量'] * 1.5)]
+        
     if filter_ma_up: df = df[df['位置'] == "🟢生命線上"]
 
     if len(df) == 0:
