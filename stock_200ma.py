@@ -8,8 +8,7 @@ import plotly.graph_objects as go
 import requests
 
 # --- 1. 網頁設定 ---
-VER = "ver2.3"
-# 修改網頁標題
+VER = "ver2.5"
 st.set_page_config(page_title=f"🍍 旺來-台股生命線({VER})", layout="wide")
 
 # --- 2. 核心功能區 ---
@@ -48,11 +47,65 @@ def calculate_kd_values(df, n=9):
     except:
         return 50, 50
 
+def analyze_backtest(df):
+    """
+    回測邏輯：
+    1. 針對該股票過去 30 天的歷史數據。
+    2. 找出「最低價碰到生命線」且「收盤價守住生命線」的日子 (Touch Event)。
+    3. 檢查該日子後的 5 天內，股價是否上漲 (收盤價 > 觸碰日收盤價)。
+    回傳: (總觸碰次數, 成功反彈次數)
+    """
+    try:
+        # 確保有足夠數據算 200MA
+        if len(df) < 250: return 0, 0
+        
+        # 計算 200MA
+        ma200 = df['Close'].rolling(window=200).mean()
+        
+        # 取最近 30 天 (保留最後 5 天做驗證，所以只檢查 day -30 到 day -5)
+        # 這樣才能確認「之後」有沒有漲
+        check_window = df.iloc[-35:-5]
+        
+        touch_count = 0
+        win_count = 0
+        
+        for i in range(len(check_window)):
+            date = check_window.index[i]
+            price_low = check_window['Low'].iloc[i]
+            price_close = check_window['Close'].iloc[i]
+            ma_val = ma200.loc[date]
+            
+            if pd.isna(ma_val): continue
+            
+            # 條件：最低價跌破或碰到生命線 (1%緩衝)，但收盤價站穩 (或在線下 1% 以內)
+            # 這裡定義寬鬆一點：只要 Low <= MA * 1.01 就算碰到
+            if price_low <= ma_val * 1.01:
+                touch_count += 1
+                
+                # 檢查後續 5 天的表現
+                # 取得該日之後的 5 天數據
+                future_idx = df.index.get_loc(date)
+                future_prices = df['Close'].iloc[future_idx+1 : future_idx+6]
+                
+                if len(future_prices) > 0:
+                    max_future = future_prices.max()
+                    # 如果後續 5 天內最高價 > 觸碰日收盤價 * 1.02 (漲2%)
+                    if max_future > price_close * 1.02:
+                        win_count += 1
+                        
+        return touch_count, win_count
+    except:
+        return 0, 0
+
 def fetch_all_data(stock_dict, progress_bar, status_text):
     all_tickers = list(stock_dict.keys())
     BATCH_SIZE = 30
     total_batches = (len(all_tickers) // BATCH_SIZE) + 1
     raw_data_list = []
+
+    # 全局回測統計
+    global_touches = 0
+    global_wins = 0
 
     for i, batch_idx in enumerate(range(0, len(all_tickers), BATCH_SIZE)):
         batch = all_tickers[batch_idx : batch_idx + BATCH_SIZE]
@@ -91,6 +144,7 @@ def fetch_all_data(stock_dict, progress_bar, status_text):
                         
                         if pd.isna(price) or pd.isna(ma200) or ma200 == 0: continue
 
+                        # 1. 開寶箱判定
                         is_treasure = False
                         my_recent_c = recent_close_df[ticker]
                         my_recent_ma = recent_ma200_df[ticker]
@@ -102,7 +156,16 @@ def fetch_all_data(stock_dict, progress_bar, status_text):
                             if cond_today_up and cond_past_down:
                                 is_treasure = True
 
-                        stock_df = pd.DataFrame({'Close': df_c[ticker], 'High': df_h[ticker], 'Low': df_l[ticker]}).dropna()
+                        # 2. 執行個股回測 (近一個月)
+                        stock_df = pd.DataFrame({
+                            'Close': df_c[ticker], 'High': df_h[ticker], 'Low': df_l[ticker]
+                        }).dropna()
+                        
+                        t_count, w_count = analyze_backtest(stock_df)
+                        global_touches += t_count
+                        global_wins += w_count
+                        
+                        # 3. KD 計算
                         k_val, d_val = 0, 0
                         if len(stock_df) >= 9:
                             k_val, d_val = calculate_kd_values(stock_df)
@@ -110,13 +173,18 @@ def fetch_all_data(stock_dict, progress_bar, status_text):
                         bias = ((price - ma200) / ma200) * 100
                         stock_info = stock_dict.get(ticker)
                         if not stock_info: continue
+                        
+                        # 4. 整理回測數據字串
+                        backtest_str = "無"
+                        if t_count > 0:
+                            win_rate = int((w_count / t_count) * 100)
+                            backtest_str = f"{win_rate}% ({w_count}/{t_count})"
 
                         raw_data_list.append({
                             '代號': stock_info['code'],
                             '名稱': stock_info['name'],
-                            '完整代號': ticker,
                             '收盤價': float(price),
-                            '200MA': float(ma200),
+                            '生命線(200MA)': float(ma200),
                             '乖離率(%)': float(bias),
                             'abs_bias': abs(float(bias)),
                             '成交量': int(vol),
@@ -124,49 +192,30 @@ def fetch_all_data(stock_dict, progress_bar, status_text):
                             'K值': float(k_val),
                             'D值': float(d_val),
                             '位置': "🟢生命線上" if price >= ma200 else "🔴生命線下",
-                            '開寶箱': is_treasure
+                            '開寶箱': is_treasure,
+                            '近月反彈勝率': backtest_str # 新增欄位
                         })
                     except: continue
         except: pass
         
         current_progress = (i + 1) / total_batches
-        # 修改進度條文字
         progress_bar.progress(current_progress, text=f"正在開鎖寶箱...({int(current_progress*100)}%)")
         time.sleep(0.05)
     
+    # 將全局回測結果存入 Session State 供介面使用
+    if global_touches > 0:
+        global_win_rate = int((global_wins / global_touches) * 100)
+    else:
+        global_win_rate = 0
+    st.session_state['global_backtest'] = {
+        'touches': global_touches,
+        'wins': global_wins,
+        'rate': global_win_rate
+    }
+    
     return pd.DataFrame(raw_data_list)
 
-def plot_stock_chart(ticker, name):
-    try:
-        df = yf.download(ticker, period="1y", interval="1d", progress=False, auto_adjust=False)
-        if df.index.tz is not None: df.index = df.index.tz_localize(None)
-        df = df[df['Volume'] > 0].dropna()
-        df['DateStr'] = df.index.strftime('%Y-%m-%d')
-        if df.empty:
-            st.error("無法取得有效數據")
-            return
-
-        df['200MA'] = df['Close'].rolling(window=200).mean()
-        # 移除 20MA (月線)，只保留生命線
-
-        fig = go.Figure()
-        fig.add_trace(go.Candlestick(
-            x=df['DateStr'], open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'],
-            name='日收盤價', # 修改 K 線名稱
-            increasing_line_color='red', decreasing_line_color='green'
-        ))
-        # 只畫出生命線
-        fig.add_trace(go.Scatter(x=df['DateStr'], y=df['200MA'], line=dict(color='orange', width=2), name='生命線 (200MA)'))
-
-        fig.update_layout(
-            title=f"📊 {name} ({ticker}) 日K線圖", yaxis_title='股價', height=600, hovermode="x unified",
-            xaxis=dict(type='category', tickangle=-45, nticks=20), xaxis_rangeslider_visible=False
-        )
-        st.plotly_chart(fig, use_container_width=True)
-    except Exception as e: st.error(f"繪圖失敗: {e}")
-
 # --- 3. 介面顯示區 ---
-# 修改主標題
 st.title(f"🍍 {VER} 旺來-台股生命線")
 st.markdown("---")
 
@@ -174,6 +223,8 @@ if 'master_df' not in st.session_state:
     st.session_state['master_df'] = None
 if 'last_update' not in st.session_state:
     st.session_state['last_update'] = None
+if 'global_backtest' not in st.session_state:
+    st.session_state['global_backtest'] = None
 
 with st.sidebar:
     st.header("1. 資料庫管理")
@@ -181,7 +232,7 @@ with st.sidebar:
     if st.button("🔄 更新股價資料 (開市請按我)", type="primary"):
         stock_dict = get_stock_list()
         
-        # 使用 Emoji 動畫
+        # Emoji 動畫
         placeholder_emoji = st.empty() 
         with placeholder_emoji:
             st.markdown("""
@@ -223,18 +274,35 @@ with st.sidebar:
     filter_ma_up = st.checkbox("只看站上生命線 (多方)", value=False)
     
     st.divider()
+    # --- 新增功能：策略驗證按鈕 ---
+    show_backtest = st.checkbox("🧪 顯示近一月策略勝率", value=False)
+    
+    st.divider()
     with st.expander("📅 版本開發紀錄"):
         st.markdown("""
-        **Ver 2.3 (Final Name)**
-        - 正式命名：**🍍 旺來-台股生命線**。
-        - 優化：圖表移除月線，專注於生命線 (200MA)。
-        - 文案：全面改為「開鎖寶箱」風格。
+        **Ver 2.5 (Strategy Backtest)**
+        - 新增：策略驗證功能。統計過去一個月所有觸碰生命線股票的反彈勝率。
+        - 介面：移除 K 線圖，改為純數據表格與驗證報告。
+        - 視覺：更新歡迎畫面為「寶箱炸開」GIF。
         """)
 
 # 主畫面
 if st.session_state['master_df'] is not None:
     df = st.session_state['master_df'].copy()
     
+    # --- 顯示策略驗證看板 (如果勾選) ---
+    if show_backtest and st.session_state['global_backtest']:
+        bt = st.session_state['global_backtest']
+        st.markdown(f"""
+        <div style="background-color: #e8f4f8; padding: 15px; border-radius: 10px; border-left: 5px solid #00a8cc; margin-bottom: 20px;">
+            <h3 style="margin:0; color: #00607a;">🧪 生命線戰法 - 近月準確度驗證</h3>
+            <p>在過去 30 天內，全台股共有 <b>{bt['touches']}</b> 次觸碰生命線紀錄。</p>
+            <p>其中有 <b>{bt['wins']}</b> 次在隨後 5 日內成功反彈 (漲幅 > 2%)。</p>
+            <h2 style="color: #00a8cc; margin:0;">🔥 近期勝率：{bt['rate']}%</h2>
+        </div>
+        """, unsafe_allow_html=True)
+
+    # 篩選邏輯
     df = df[df['abs_bias'] <= bias_threshold]
     df = df[df['成交量'] >= (min_vol_input * 1000)]
     
@@ -246,6 +314,7 @@ if st.session_state['master_df'] is not None:
     if len(df) == 0:
         st.warning(f"⚠️ 找不到符合條件的股票！\n\n請嘗試放寬乖離率範圍 (例如拉大到 5%) 或是取消部分勾選。")
     else:
+        # 標題看板
         st.markdown(f"""
         <div style="background-color: #f0f2f6; padding: 15px; border-radius: 10px; text-align: center; border: 2px solid #ff4b4b;">
             <h2 style="color: #333; margin:0;">🔍 根據目前條件，共篩選出 <span style="color: #ff4b4b; font-size: 1.5em;">{len(df)}</span> 檔股票</h2>
@@ -255,50 +324,35 @@ if st.session_state['master_df'] is not None:
         
         df['成交量(張)'] = (df['成交量'] / 1000).astype(int)
         df['KD值'] = df.apply(lambda x: f"K:{int(x['K值'])} D:{int(x['D值'])}", axis=1)
-        df['選股標籤'] = df['代號'] + " " + df['名稱']
         
-        display_cols = ['代號', '名稱', '收盤價', '成交量(張)', '乖離率(%)', '位置', 'KD值']
+        # 顯示欄位：移除圖表，加入回測勝率
+        display_cols = ['代號', '名稱', '收盤價', '生命線(200MA)', '乖離率(%)', '成交量(張)', '位置', 'KD值', '近月反彈勝率']
+        
         if filter_treasure:
              df = df.sort_values(by='成交量', ascending=False)
         else:
              df = df.sort_values(by='abs_bias')
         
-        tab1, tab2 = st.tabs(["📋 篩選結果列表", "📊 日K線技術分析"])
-        
-        with tab1:
-            def highlight_row(row):
-                if row['位置'] == "🟢生命線上":
-                    return ['background-color: #e6fffa; color: black'] * len(row)
-                else:
-                    return ['background-color: #fff0f0; color: black'] * len(row)
+        # --- 顯示結果表格 (無圖表模式) ---
+        def highlight_row(row):
+            if row['位置'] == "🟢生命線上":
+                return ['background-color: #e6fffa; color: black'] * len(row)
+            else:
+                return ['background-color: #fff0f0; color: black'] * len(row)
 
-            st.dataframe(
-                df[display_cols].style.apply(highlight_row, axis=1),
-                use_container_width=True,
-                hide_index=True
-            )
-
-        with tab2:
-            st.markdown("### 🔍 個股日K線圖")
-            if len(df) > 0:
-                selected_stock_label = st.selectbox("請選擇一檔股票：", df['選股標籤'].tolist())
-                selected_row = df[df['選股標籤'] == selected_stock_label].iloc[0]
-                target_ticker = selected_row['完整代號']
-                target_name = selected_row['名稱']
-                
-                plot_stock_chart(target_ticker, target_name)
-                
-                col1, col2, col3 = st.columns(3)
-                col1.metric("目前股價", selected_row['收盤價'])
-                col2.metric("生命線 (200MA)", selected_row['200MA'], delta=f"{selected_row['乖離率(%)']}%")
-                col3.metric("KD指標", selected_row['KD值'])
+        st.dataframe(
+            df[display_cols].style.apply(highlight_row, axis=1),
+            use_container_width=True,
+            hide_index=True
+        )
 
 else:
     st.warning("👈 請先點擊左側 sidebar 的 **「🔄 更新股價資料」** 按鈕開始挖寶！")
     
-    # 歡迎畫面：漲停頂開寶箱圖 (客製化)
-    custom_image_url = "https://i.imgur.com/8uQGz5D.jpeg"
+    # --- 歡迎畫面：寶箱炸開 (符合您的要求) ---
+    # 這裡放一個寶箱金幣的 GIF
+    chest_explode_url = "https://cdn.pixabay.com/animation/2023/02/09/21/29/chest-7779776_512.gif"
     
     col1, col2, col3 = st.columns([1, 2, 1])
     with col2:
-        st.image(custom_image_url, caption="祝您操作順利，天天漲停板，寶箱開不完！🚀💰")
+        st.image(chest_explode_url, caption="💰 準備好了嗎？點擊左上角開始挖寶！")
