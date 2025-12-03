@@ -6,10 +6,10 @@ import time
 from datetime import datetime
 import plotly.graph_objects as go
 import requests
-import os # 新增 os 模組用來檢查圖片是否存在
+import os
 
 # --- 1. 網頁設定 ---
-VER = "ver3.4"
+VER = "ver3.6"
 st.set_page_config(page_title=f"🍍 旺來-台股生命線({VER})", layout="wide")
 
 # --- 2. 核心功能區 ---
@@ -348,18 +348,25 @@ with st.sidebar:
         bt_progress.empty()
         st.success("回測完成！請查看下方結果。")
 
-    with st.expander("📅 版本開發紀錄 (System Changelog)"):
+    with st.expander("📅 系統開發日誌 (Changelog)"):
         st.markdown("""
-        #### Ver 3.4 (Purple East)
-        * **Visual**: 歡迎畫面更換為「紫氣東來」招財符，象徵財運亨通。
-        * **Stable**: 改用本地圖檔讀取機制，徹底解決圖片連結失效問題。
+        ### Ver 3.6 (Visual Polish)
+        * **UI/UX**: 優化歡迎畫面，縮小圖片比例並採用亮金色文字，提升視覺質感與閱讀性。
 
-        #### Ver 3.3 (UI Polishing)
-        * **Optimization**: 介面極簡化，移除多餘標題與選項。
+        ### Ver 3.5 (Aesthetics & Image Patch)
+        * **UI/UX**: 介面極簡化，移除冗餘選項與標題。
+        * **Asset**: 改用本地 `welcome.jpg` 讀取機制，修復外部連結失效問題。
 
-        #### Ver 2.x Series (Strategy Engine)
-        * **Ver 2.8 - 2.9**: 策略核心更新 (1.5倍出量、2年回測數據)。
-        * **Ver 2.6**: 實裝獨立回測模組。
+        ### Ver 3.x Series (Analytics Core)
+        * **Ver 3.1 - 3.2**: 實裝月份分組 (Grouping) 回測報表。
+        * **Algorithm Refinement**:
+            ```python
+            # LifeLine Strategy Logic
+            def check_signal(price, volume, lifeline, slope):
+                # 趨勢向上 + 爆量 + 站穩
+                if slope > 0 and volume > 1.5 * prev_volume and price > lifeline:
+                    return "Signal Detected"
+            ```
         """)
 
 # 主畫面 - 回測報告
@@ -487,11 +494,21 @@ if st.session_state['master_df'] is not None:
 else:
     st.warning("👈 請先點擊左側 sidebar 的 **「🔄 更新股價資料」** 按鈕開始挖寶！")
     
-    # --- 這裡使用剛剛上傳的圖片 ---
-    col1, col2, col3 = st.columns([1, 2, 1])
+    # --- 修改這裡：縮小圖片並使用金色文字 ---
+    col1, col2, col3 = st.columns([2, 1, 2]) # 將中間欄位變窄 (1/5 寬度)
     with col2:
-        # 如果檔案存在才顯示，避免報錯
         if os.path.exists("welcome.jpg"):
-            st.image("welcome.jpg", caption="這是數年來的經驗收納\n此工具僅供參考，不代表投資建議\n預祝心想事成，從從容容，紫氣東來!")
+            st.image("welcome.jpg", use_column_width=True)
+            # 使用 HTML 設定金色文字
+            st.markdown(
+                """
+                <div style="text-align: center; color: #FFD700; font-size: 1em; margin-top: 15px; line-height: 1.5;">
+                    這是數年來的經驗收納<br>
+                    此工具僅供參考，不代表投資建議<br>
+                    預祝心想事成，從從容容，紫氣東來! 🟣✨
+                </div>
+                """,
+                unsafe_allow_html=True
+            )
         else:
-            st.info("💡 小提醒：請將您的圖片上傳到 GitHub 並命名為 welcome.jpg，這裡就會顯示囉！")
+            st.info("💡 小提醒：請將您的紫色招財圖上傳至 GitHub 並命名為 welcome.jpg，這裡就會顯示囉！")
