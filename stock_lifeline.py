@@ -369,4 +369,197 @@ with st.sidebar:
     
     st.divider()
     st.header("2. 即時篩選器")
-    bias_threshold = st.slider("乖離率範圍 (±%)",
+    bias_threshold = st.slider("乖離率範圍 (±%)", 0.5, 5.0, 2.5, step=0.1)
+    st.caption("設定股價距離「生命線」多近視為符合條件。")
+    min_vol_input = st.number_input("最低成交量 (張)", value=1000, step=100)
+    
+    st.subheader("進階條件")
+    
+    filter_trend_up = st.checkbox("📈 生命線向上 (多方助漲)", value=False)
+    filter_trend_down = st.checkbox("📉 生命線向下 (空方壓力)", value=False)
+    
+    filter_treasure = st.checkbox("🔥 浴火重生 (假跌破拉回)", value=False)
+    st.caption("🔍 尋找過去7日內曾跌破，但今日站回生命線的強勢股")
+    
+    filter_kd = st.checkbox("KD 黃金交叉 (K > D)", value=False)
+    filter_vol_double = st.checkbox("出量 (今日 > 昨日x1.5)", value=False)
+    
+    st.divider()
+    
+    st.caption("⚠️ 注意：回測需調閱2年歷史資料，運算時間較長 (約2分鐘)。")
+    if st.button("🧪 策略回測 (近3個月表現)"):
+        st.info("阿吉正在調閱過去2年的歷史檔案，進行深度驗證... (請稍候) ⏳")
+        stock_dict = get_stock_list()
+        bt_progress = st.progress(0, text="初始化回測...")
+        
+        bt_df = run_strategy_backtest(
+            stock_dict, 
+            bt_progress, 
+            use_trend_up=filter_trend_up, 
+            use_treasure=filter_treasure, 
+            use_vol=filter_vol_double
+        )
+        
+        st.session_state['backtest_result'] = bt_df
+        bt_progress.empty()
+        st.success("回測完成！請查看下方結果。")
+
+    with st.expander("📅 系統開發日誌 (Changelog)"):
+        st.markdown("""
+        ### Ver 3.11 (Simple Line Chart)
+        * **Visual**: 圖表改版，捨棄 K 線，改用純粹的「收盤價 vs 生命線」雙線圖，趨勢一目了然。
+        * **Term**: 回測報告中的 Big Win 更名為「驗證成功」。
+
+        ### Ver 3.10 (Win Rate Logic)
+        * **Correction**: 修正勝率判定邏輯 (漲幅 > 0% 即為 Win)。
+        """)
+
+# 主畫面 - 回測報告
+if st.session_state['backtest_result'] is not None:
+    bt_df = st.session_state['backtest_result']
+    st.markdown("---")
+    
+    strategy_name = "基礎策略"
+    if filter_treasure: strategy_name = "浴火重生(假跌破)"
+    elif filter_trend_up: strategy_name = "趨勢向上 + 支撐"
+    
+    st.subheader(f"🧪 策略回測報告：{strategy_name} (歷史訊號驗證)")
+    
+    if len(bt_df) > 0:
+        months = sorted(bt_df['月份'].unique())
+        
+        tabs = st.tabs(["📊 總覽"] + months)
+        
+        with tabs[0]:
+            # 包含 Big Win 和 Win
+            win_count = len(bt_df[bt_df['結果'].str.contains("Win")])
+            total_count = len(bt_df)
+            win_rate = int((win_count / total_count) * 100)
+            avg_max_ret = round(bt_df['最高漲幅(%)'].mean(), 2)
+            
+            col1, col2, col3 = st.columns(3)
+            col1.metric("總觸發次數", total_count)
+            col2.metric("總反彈機率 (漲幅>0%)", f"{win_rate}%")
+            col3.metric("總平均最高漲幅", f"{avg_max_ret}%")
+            st.dataframe(bt_df, use_container_width=True)
+
+        for i, m in enumerate(months):
+            with tabs[i+1]:
+                m_df = bt_df[bt_df['月份'] == m]
+                
+                m_win = len(m_df[m_df['結果'].str.contains("Win")])
+                m_total = len(m_df)
+                m_rate = int((m_win / m_total) * 100) if m_total > 0 else 0
+                m_avg = round(m_df['最高漲幅(%)'].mean(), 2) if m_total > 0 else 0
+                
+                c1, c2, c3 = st.columns(3)
+                c1.metric(f"{m} 觸發次數", m_total)
+                c2.metric(f"{m} 反彈機率", f"{m_rate}%")
+                c3.metric(f"{m} 平均漲幅", f"{m_avg}%")
+                
+                def color_ret(val):
+                    color = 'red' if val > 0 else 'green'
+                    return f'color: {color}'
+                st.dataframe(m_df.style.map(color_ret, subset=['最高漲幅(%)']), use_container_width=True)
+
+    else:
+        st.warning("在此回測期間內，沒有股票符合您目前勾選的條件組合。")
+    st.markdown("---")
+
+# 主畫面 - 日常篩選
+if st.session_state['master_df'] is not None:
+    df = st.session_state['master_df'].copy()
+    
+    # 防呆
+    if '生命線' not in df.columns:
+        st.error("⚠️ 資料結構已更新！請點擊左側紅色的 **「🔄 更新股價資料」** 按鈕。")
+        st.stop()
+
+    df = df[df['abs_bias'] <= bias_threshold]
+    df = df[df['成交量'] >= (min_vol_input * 1000)]
+    
+    if filter_trend_up and filter_trend_down:
+        st.error("❌ 請勿同時勾選「生命線向上」與「生命線向下」，這兩個條件是互斥的！")
+        df = df[0:0] 
+    elif filter_trend_up:
+        df = df[df['生命線趨勢'] == "⬆️向上"]
+    elif filter_trend_down:
+        df = df[df['生命線趨勢'] == "⬇️向下"]
+
+    if filter_treasure: df = df[df['浴火重生'] == True]
+    if filter_kd: df = df[df['K值'] > df['D值']]
+    
+    if filter_vol_double: 
+        df = df[df['成交量'] > (df['昨日成交量'] * 1.5)]
+        
+    if len(df) == 0:
+        st.warning(f"⚠️ 找不到符合條件的股票！")
+    else:
+        st.markdown(f"""
+        <div style="background-color: #f0f2f6; padding: 15px; border-radius: 10px; text-align: center; border: 2px solid #ff4b4b;">
+            <h2 style="color: #333; margin:0;">🔍 根據目前條件，共篩選出 <span style="color: #ff4b4b; font-size: 1.5em;">{len(df)}</span> 檔股票</h2>
+        </div>
+        <br>
+        """, unsafe_allow_html=True)
+        
+        df['成交量(張)'] = (df['成交量'] / 1000).astype(int)
+        df['KD值'] = df.apply(lambda x: f"K:{int(x['K值'])} D:{int(x['D值'])}", axis=1)
+        df['選股標籤'] = df['代號'] + " " + df['名稱']
+        
+        display_cols = ['代號', '名稱', '收盤價', '生命線', '生命線趨勢', '乖離率(%)', '位置', 'KD值', '成交量(張)']
+        if filter_treasure:
+             df = df.sort_values(by='成交量', ascending=False)
+        else:
+             df = df.sort_values(by='abs_bias')
+        
+        tab1, tab2 = st.tabs(["📋 篩選結果列表", "📊 日趨勢圖"])
+        
+        with tab1:
+            def highlight_row(row):
+                if row['位置'] == "🟢生命線上":
+                    return ['background-color: #e6fffa; color: black'] * len(row)
+                else:
+                    return ['background-color: #fff0f0; color: black'] * len(row)
+
+            st.dataframe(
+                df[display_cols].style.apply(highlight_row, axis=1),
+                use_container_width=True,
+                hide_index=True
+            )
+
+        with tab2:
+            st.markdown("### 🔍 個股近半年趨勢圖")
+            if len(df) > 0:
+                selected_stock_label = st.selectbox("請選擇一檔股票：", df['選股標籤'].tolist())
+                selected_row = df[df['選股標籤'] == selected_stock_label].iloc[0]
+                target_ticker = selected_row['完整代號']
+                target_name = selected_row['名稱']
+                
+                plot_stock_chart(target_ticker, target_name)
+                
+                col1, col2, col3 = st.columns(3)
+                col1.metric("目前股價", selected_row['收盤價'])
+                col2.metric("生命線", selected_row['生命線'], delta=f"{selected_row['乖離率(%)']}%")
+                col3.metric("KD指標", selected_row['KD值'])
+
+else:
+    st.warning("👈 請先點擊左側 sidebar 的 **「🔄 更新股價資料」** 按鈕開始挖寶！")
+    
+    col1, col2, col3 = st.columns([1, 2, 1])
+    with col2:
+        if os.path.exists("welcome.jpg"):
+            st.markdown(
+                """
+                <div style="text-align: center; color: #333333; font-size: 1.1em; margin-bottom: 20px; line-height: 1.6; font-weight: bold;">
+                    這是數年來的經驗收納<br>
+                    此工具僅供參考，不代表投資建議<br>
+                    預祝心想事成，從從容容，紫氣東來! 🟣✨
+                </div>
+                """,
+                unsafe_allow_html=True
+            )
+            sub_c1, sub_c2, sub_c3 = st.columns([1, 1, 1])
+            with sub_c2:
+                 st.image("welcome.jpg", width=180)
+        else:
+            st.info("💡 尚未偵測到 welcome.jpg，請將您的紫色招財圖上傳至 GitHub 並命名為 welcome.jpg，這裡就會顯示囉！")
