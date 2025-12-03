@@ -3,13 +3,13 @@ import yfinance as yf
 import pandas as pd
 import twstock
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 import plotly.graph_objects as go
-import requests
+import numpy as np
 import os
 
 # --- 1. 網頁設定 ---
-VER = "ver4.1_Fix"
+VER = "ver4.2_Ultimate"
 st.set_page_config(page_title=f"🍍 旺來-台股生命線({VER})", layout="wide")
 
 # --- 2. 核心功能區 ---
@@ -39,14 +39,10 @@ def get_stock_list():
 
 def calculate_kd_values(df, n=9):
     try:
-        # 防呆：資料不足不計算
-        if len(df) < n: return 50, 50
-        
         low_min = df['Low'].rolling(window=n).min()
         high_max = df['High'].rolling(window=n).max()
         rsv = (df['Close'] - low_min) / (high_max - low_min) * 100
         rsv = rsv.fillna(50)
-        
         k, d = 50, 50
         for r in rsv:
             k = (2/3) * k + (1/3) * r
@@ -55,7 +51,7 @@ def calculate_kd_values(df, n=9):
     except:
         return 50, 50
 
-# --- 策略回測核心函數 ---
+# --- 【核心修正】策略回測函數 (整合第二版邏輯) ---
 def run_strategy_backtest(stock_dict, progress_bar, use_trend_up, use_treasure, use_vol):
     results = []
     all_tickers = list(stock_dict.keys())
@@ -65,7 +61,7 @@ def run_strategy_backtest(stock_dict, progress_bar, use_trend_up, use_treasure, 
     for i, batch_idx in enumerate(range(0, len(all_tickers), BATCH_SIZE)):
         batch = all_tickers[batch_idx : batch_idx + BATCH_SIZE]
         try:
-            # 抓取 2 年資料
+            # 下載 2 年數據以確保有足夠的移動平均線和未來驗證數據
             data = yf.download(batch, period="2y", interval="1d", progress=False, auto_adjust=False)
             if not data.empty:
                 try:
@@ -76,6 +72,7 @@ def run_strategy_backtest(stock_dict, progress_bar, use_trend_up, use_treasure, 
                 except KeyError:
                     continue
                 
+                # 處理單一股票的情況 (Series 轉 DataFrame)
                 if isinstance(df_c, pd.Series):
                     df_c = df_c.to_frame(name=batch[0])
                     df_v = df_v.to_frame(name=batch[0])
@@ -83,22 +80,25 @@ def run_strategy_backtest(stock_dict, progress_bar, use_trend_up, use_treasure, 
                     df_h = df_h.to_frame(name=batch[0])
 
                 ma200_df = df_c.rolling(window=200).mean()
-                scan_window = df_c.index[-120:-25] # 擴大掃描範圍 (近半年，保留一個月驗證)
+                
+                # 掃描窗口：保留最後 20 天作為驗證期 (避免 index out of bound)，只回測到 20 天前
+                scan_window = df_c.index[-250:-20] 
                 
                 for ticker in df_c.columns:
                     try:
                         c_series = df_c[ticker]
                         v_series = df_v[ticker]
                         l_series = df_l[ticker]
-                        h_series = df_h[ticker]
                         ma_series = ma200_df[ticker]
                         
                         stock_name = stock_dict.get(ticker, {}).get('name', ticker)
+                        stock_code = stock_dict.get(ticker, {}).get('code', ticker.split('.')[0])
                         
                         for date in scan_window:
                             if pd.isna(ma_series[date]): continue
                             
                             idx = c_series.index.get_loc(date)
+                            # 確保有足夠的歷史數據進行判斷
                             if idx < 20: continue 
 
                             close_p = c_series.iloc[idx]
@@ -112,6 +112,7 @@ def run_strategy_backtest(stock_dict, progress_bar, use_trend_up, use_treasure, 
 
                             is_match = False
                             
+                            # --- 策略判斷邏輯 (與第一版相同) ---
                             if use_trend_up and (ma_val <= ma_val_20ago): continue
                             if use_vol and (vol <= prev_vol * 1.5): continue
 
@@ -126,64 +127,85 @@ def run_strategy_backtest(stock_dict, progress_bar, use_trend_up, use_treasure, 
                                 cond_past_down = (past_c < past_ma).any()
                                 if cond_today_up and cond_past_down: is_match = True
                             else:
+                                # 一般策略：接近均線且在均線上
                                 cond_near = (low_p <= ma_val * 1.03) and (low_p >= ma_val * 0.90) 
                                 cond_up = (close_p > ma_val)
                                 if cond_near and cond_up: is_match = True
                             
+                            # --- 【第二版邏輯植入】驗證與數據計算 ---
                             if is_match:
-                                # 未來表現追蹤
-                                # 1週後 (5天)
-                                p_1w = c_series.iloc[idx+5] if len(c_series) > idx+5 else None
-                                ret_1w = (p_1w - close_p)/close_p*100 if p_1w else 0
-                                
-                                # 2週後 (10天)
-                                p_2w = c_series.iloc[idx+10] if len(c_series) > idx+10 else None
-                                ret_2w = (p_2w - close_p)/close_p*100 if p_2w else 0
-                                
-                                # 1個月後 (20天)
-                                p_1m = c_series.iloc[idx+20] if len(c_series) > idx+20 else None
-                                ret_1m = (p_1m - close_p)/close_p*100 if p_1m else 0
-
-                                # 期間最高漲幅 (2週內)
-                                future_highs = h_series.iloc[idx+1 : idx+11]
-                                max_price = future_highs.max()
-                                max_profit_pct = (max_price - close_p) / close_p * 100
-                                
-                                month_str = date.strftime('%m月')
-                                
-                                # --- 修正判定名詞 ---
-                                if max_profit_pct > 10.0:
-                                    result_status = "浴火重生 🔥" # >10%
-                                elif max_profit_pct > 3.0:
-                                    result_status = "反彈成功 🏆" # >3%
-                                elif max_profit_pct > 0:
-                                    result_status = "小幅反彈"   # >0%
+                                # 1. 驗證：抓取未來第 20 個交易日的收盤價
+                                # 檢查是否還有未來 20 天的數據
+                                if idx + 20 < len(c_series):
+                                    future_close = c_series.iloc[idx + 20]
+                                    profit_pct = (future_close - close_p) / close_p * 100
+                                    
+                                    if profit_pct > 0:
+                                        result_status = "Win (上漲)"
+                                    else:
+                                        result_status = "Loss (下跌)"
                                 else:
-                                    result_status = "失敗 📉"     # <=0%
+                                    # 如果是最近一個月內的訊號，還沒有第 20 天的數據
+                                    profit_pct = np.nan
+                                    result_status = "統計中"
+
+                                month_str = date.strftime('%Y-%m') # 使用 年-月 格式方便排序
                                 
                                 results.append({
                                     '月份': month_str,
-                                    '代號': ticker.replace(".TW", "").replace(".TWO", ""),
+                                    'StockID': stock_code, # 為了配合第二版邏輯，使用 StockID
                                     '名稱': stock_name,
+                                    'Date': date, # 保留 datetime 物件方便排序
                                     '訊號日期': date.strftime('%Y-%m-%d'),
-                                    '訊號價': round(close_p, 2),
-                                    '最高漲幅(%)': round(max_profit_pct, 2),
-                                    '1週漲幅(%)': round(ret_1w, 2),
-                                    '2週漲幅(%)': round(ret_2w, 2),
-                                    '1月漲幅(%)': round(ret_1m, 2),
+                                    '訊號價': float(close_p),
+                                    '未來20日收盤': float(future_close) if not np.isnan(profit_pct) else np.nan,
+                                    '一個月內漲幅(%)': float(profit_pct) if not np.isnan(profit_pct) else np.nan,
                                     '結果': result_status
                                 })
-                                break 
-                    except:
+                                # 一個月內同一支股票只取一次訊號，避免重複計算 (Skip next 20 days)
+                                # 這裡簡化處理，直接 break 當月循環或由使用者自行判斷
+                                # 在此版本我們記錄所有觸發點，讓「觸發次數」功能生效
+                                
+                    except Exception as e:
                         continue
         except:
             pass
         
         progress = (i + 1) / total_batches
-        progress_bar.progress(progress, text=f"深度回測中 (計算多週期回報)...({int(progress*100)}%)")
+        progress_bar.progress(progress, text=f"深度回測中 (整合第二版驗證邏輯)...({int(progress*100)}%)")
         
-    return pd.DataFrame(results)
+    # --- 【第二版後處理】統計與日誌生成 ---
+    if not results:
+        return pd.DataFrame()
 
+    df_results = pd.DataFrame(results)
+
+    # 1. 觸發次數統計 (Count)
+    df_results['觸發次數'] = df_results.groupby('StockID')['StockID'].transform('count')
+
+    # 2. 數據淨化 (Rounding)
+    numeric_cols = ['訊號價', '未來20日收盤', '一個月內漲幅(%)']
+    for col in numeric_cols:
+        if col in df_results.columns:
+            df_results[col] = df_results[col].round(2)
+
+    # 3. 詳細日誌 (Log)
+    def generate_log(row):
+        rise_pct = f"{row['一個月內漲幅(%)']}%" if not pd.isna(row['一個月內漲幅(%)']) else "統計中"
+        return (f"日期: {row['訊號日期']} | "
+                f"股票: {row['StockID']} | "
+                f"觸發價: {row['訊號價']} | "
+                f"累計觸發: {row['觸發次數']}次 | "
+                f"後續漲幅: {rise_pct}")
+
+    df_results['紀錄日誌'] = df_results.apply(generate_log, axis=1)
+    
+    # 依照日期排序
+    df_results = df_results.sort_values(by=['Date', 'StockID'], ascending=[False, True])
+    
+    return df_results
+
+# --- 即時資料抓取 (維持第一版架構，加入數據淨化) ---
 def fetch_all_data(stock_dict, progress_bar, status_text):
     if not stock_dict: return pd.DataFrame()
     
@@ -260,15 +282,15 @@ def fetch_all_data(stock_dict, progress_bar, status_text):
                             '代號': stock_info['code'],
                             '名稱': stock_info['name'],
                             '完整代號': ticker,
-                            '收盤價': float(price),
-                            '生命線': float(ma200),
+                            '收盤價': round(float(price), 2),     # 數據淨化
+                            '生命線': round(float(ma200), 2),     # 數據淨化
                             '生命線趨勢': ma_trend,
-                            '乖離率(%)': float(bias),
+                            '乖離率(%)': round(float(bias), 2),   # 數據淨化
                             'abs_bias': abs(float(bias)),
                             '成交量': int(vol),
                             '昨日成交量': int(prev_vol),
-                            'K值': float(k_val),
-                            'D值': float(d_val),
+                            'K值': round(float(k_val), 2),        # 數據淨化
+                            'D值': round(float(d_val), 2),        # 數據淨化
                             '位置': "🟢生命線上" if price >= ma200 else "🔴生命線下",
                             '浴火重生': is_treasure
                         })
@@ -296,15 +318,31 @@ def plot_stock_chart(ticker, name):
         plot_df['DateStr'] = plot_df.index.strftime('%Y-%m-%d')
 
         fig = go.Figure()
-        fig.add_trace(go.Candlestick(
-            x=plot_df['DateStr'], open=plot_df['Open'], high=plot_df['High'], low=plot_df['Low'], close=plot_df['Close'],
-            name='日收盤價', increasing_line_color='red', decreasing_line_color='green'
+        
+        # 純線圖 (Line Chart) - 第一版風格
+        fig.add_trace(go.Scatter(
+            x=plot_df['DateStr'], 
+            y=plot_df['Close'], 
+            mode='lines',
+            name='收盤價',
+            line=dict(color='#00CC96', width=2.5) 
         ))
-        fig.add_trace(go.Scatter(x=plot_df['DateStr'], y=plot_df['200MA'], line=dict(color='orange', width=2), name='生命線'))
+        
+        fig.add_trace(go.Scatter(
+            x=plot_df['DateStr'], 
+            y=plot_df['200MA'], 
+            mode='lines',
+            name='生命線',
+            line=dict(color='#FFA15A', width=3) 
+        ))
 
         fig.update_layout(
-            title=f"📊 {name} ({ticker}) 近半年日K線圖", yaxis_title='股價', height=600, hovermode="x unified",
-            xaxis=dict(type='category', tickangle=-45, nticks=20), xaxis_rangeslider_visible=False
+            title=f"📊 {name} ({ticker}) 股價 vs 生命線趨勢", 
+            yaxis_title='價格', 
+            height=500, 
+            hovermode="x unified",
+            xaxis=dict(type='category', tickangle=-45, nticks=20),
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
         )
         st.plotly_chart(fig, use_container_width=True)
     except Exception as e: st.error(f"繪圖失敗: {e}")
@@ -381,9 +419,9 @@ with st.sidebar:
     
     st.divider()
     
-    st.caption("⚠️ 注意：回測需調閱2年歷史資料，運算時間較長 (約2分鐘)。")
-    if st.button("🧪 策略回測 (近3個月表現)"):
-        st.info("阿吉正在調閱過去2年的歷史檔案，進行深度驗證... (請稍候) ⏳")
+    st.caption("⚠️ 注意：回測需調閱2年歷史資料，運算時間較長。")
+    if st.button("🧪 策略回測 (含20日後漲幅驗證)"):
+        st.info("阿吉正在調閱歷史檔案，進行第二版邏輯驗證... (請稍候) ⏳")
         stock_dict = get_stock_list()
         bt_progress = st.progress(0, text="初始化回測...")
         
@@ -397,76 +435,80 @@ with st.sidebar:
         
         st.session_state['backtest_result'] = bt_df
         bt_progress.empty()
-        st.success("回測完成！請查看下方結果。")
+        st.success("回測完成！已生成詳細報表。")
 
-    with st.expander("📅 系統開發日誌 (Changelog)"):
+    with st.expander("📅 系統開發日誌"):
         st.markdown("""
-        ### Ver 4.1 (Final Fix)
-        * **Fix**: 修復 `KeyError` 與 `image not found` 錯誤。
-        * **Feature**: 回測報告新增「反彈成功(>3%)」與「浴火重生(>10%)」分級。
-        * **Analytics**: 新增「1週/2週/1月」後續漲幅追蹤。
+        ### Ver 4.2 (Hybrid)
+        * **Merge**: 完美結合第一版介面與第二版驗證核心。
+        * **Logic**: 驗證指標改為「訊號後第20日收盤價」計算真實月漲幅。
+        * **Feature**: 新增「觸發次數」統計，識別熱門股。
+        * **UI**: 報表增加「紀錄日誌」字串，數據全面保留小數點後兩位。
         """)
 
 # 主畫面 - 回測報告
 if st.session_state['backtest_result'] is not None:
     bt_df = st.session_state['backtest_result']
     st.markdown("---")
-    st.subheader("🧪 策略回測報告 (歷史訊號驗證)")
+    
+    strategy_name = "基礎策略"
+    if filter_treasure: strategy_name = "浴火重生(假跌破)"
+    elif filter_trend_up: strategy_name = "趨勢向上 + 支撐"
+    
+    st.subheader(f"🧪 策略回測報告：{strategy_name}")
+    st.caption("驗證邏輯：計算訊號觸發後，持有 **20個交易日(約一個月)** 的漲跌幅表現。")
     
     if len(bt_df) > 0:
-        months = sorted(bt_df['月份'].unique())
+        months = sorted(bt_df['月份'].unique(), reverse=True) # 新的月份在前面
         
-        tabs = st.tabs(["📊 總覽"] + months)
+        tabs = st.tabs(["📊 總覽 (含日誌)"] + months)
         
         with tabs[0]:
-            # 計算勝率 (漲幅 > 0)
-            win_count = len(bt_df[bt_df['最高漲幅(%)'] > 0])
-            total_count = len(bt_df)
-            win_rate = int((win_count / total_count) * 100)
+            # 統計
+            win_count = len(bt_df[bt_df['結果'].str.contains("Win")])
+            valid_df = bt_df.dropna(subset=['一個月內漲幅(%)']) # 只計算有驗證結果的
+            total_count = len(valid_df)
             
-            # 計算反彈成功率 (漲幅 > 3%)
-            big_win_count = len(bt_df[bt_df['最高漲幅(%)'] > 3])
-            big_win_rate = int((big_win_count / total_count) * 100)
+            win_rate = int((win_count / total_count) * 100) if total_count > 0 else 0
+            avg_ret = round(valid_df['一個月內漲幅(%)'].mean(), 2) if total_count > 0 else 0
             
-            # 平均漲幅統計
-            avg_max_ret = round(bt_df['最高漲幅(%)'].mean(), 2)
-            avg_1w = round(bt_df['1週漲幅(%)'].mean(), 2)
-            avg_2w = round(bt_df['2週漲幅(%)'].mean(), 2)
-            avg_1m = round(bt_df['1月漲幅(%)'].mean(), 2)
+            col1, col2, col3 = st.columns(3)
+            col1.metric("有效驗證次數", total_count)
+            col2.metric("20日後上漲機率", f"{win_rate}%")
+            col3.metric("平均月漲幅", f"{avg_ret}%")
             
-            col1, col2, col3, col4, col5 = st.columns(5)
-            col1.metric("總觸發", total_count)
-            col2.metric("總勝率(>0%)", f"{win_rate}%")
-            col3.metric("反彈成功(>3%)", f"{big_win_rate}%")
-            col4.metric("浴火重生(>10%)", f"{len(bt_df[bt_df['最高漲幅(%)'] > 10])} 檔")
-            col5.metric("平均最高漲幅", f"{avg_max_ret}%")
+            # 顯示完整表格 (含新欄位)
+            show_cols = ['訊號日期', 'StockID', '名稱', '訊號價', '觸發次數', '未來20日收盤', '一個月內漲幅(%)', '紀錄日誌']
             
-            st.caption(f"📅 後續平均表現：1週 ({avg_1w}%) ➜ 2週 ({avg_2w}%) ➜ 1月 ({avg_1m}%)")
-            st.dataframe(bt_df, use_container_width=True)
+            def color_ret(val):
+                if pd.isna(val): return ''
+                color = 'red' if val > 0 else 'green'
+                return f'color: {color}'
+                
+            st.dataframe(
+                bt_df[show_cols].style.map(color_ret, subset=['一個月內漲幅(%)']), 
+                use_container_width=True
+            )
 
         for i, m in enumerate(months):
             with tabs[i+1]:
                 m_df = bt_df[bt_df['月份'] == m]
                 
-                if len(m_df) > 0:
-                    m_win = len(m_df[m_df['最高漲幅(%)'] > 0])
-                    m_rate = int((m_win / len(m_df)) * 100)
-                    m_big_win = len(m_df[m_df['最高漲幅(%)'] > 3])
-                    m_big_rate = int((m_big_win / len(m_df)) * 100)
-                    m_avg = round(m_df['最高漲幅(%)'].mean(), 2)
-                else:
-                    m_rate, m_big_rate, m_avg = 0, 0, 0
+                m_valid = m_df.dropna(subset=['一個月內漲幅(%)'])
+                m_win = len(m_valid[m_valid['一個月內漲幅(%)'] > 0])
+                m_total = len(m_valid)
+                m_rate = int((m_win / m_total) * 100) if m_total > 0 else 0
+                m_avg = round(m_valid['一個月內漲幅(%)'].mean(), 2) if m_total > 0 else 0
                 
-                c1, c2, c3, c4 = st.columns(4)
-                c1.metric(f"{m} 觸發", len(m_df))
-                c2.metric("總勝率", f"{m_rate}%")
-                c3.metric("反彈成功", f"{m_big_rate}%")
-                c4.metric("平均漲幅", f"{m_avg}%")
+                c1, c2, c3 = st.columns(3)
+                c1.metric(f"{m} 訊號數", len(m_df))
+                c2.metric("上漲機率", f"{m_rate}%")
+                c3.metric("平均漲幅", f"{m_avg}%")
                 
-                def color_ret(val):
-                    color = 'red' if val > 0 else 'green'
-                    return f'color: {color}'
-                st.dataframe(m_df.style.map(color_ret, subset=['最高漲幅(%)', '1週漲幅(%)']), use_container_width=True)
+                st.dataframe(
+                    m_df[show_cols].style.map(color_ret, subset=['一個月內漲幅(%)']), 
+                    use_container_width=True
+                )
 
     else:
         st.warning("在此回測期間內，沒有股票符合您目前勾選的條件組合。")
@@ -476,9 +518,9 @@ if st.session_state['backtest_result'] is not None:
 if st.session_state['master_df'] is not None:
     df = st.session_state['master_df'].copy()
     
-    # 修正 KeyError 的防呆機制
+    # 防呆
     if '生命線' not in df.columns:
-        st.error("⚠️ 資料庫結構不符！請點擊左側紅色的 **「🔄 更新股價資料」** 按鈕，讓阿吉幫您修復！")
+        st.error("⚠️ 資料結構已更新！請點擊左側紅色的 **「🔄 更新股價資料」** 按鈕。")
         st.stop()
 
     df = df[df['abs_bias'] <= bias_threshold]
@@ -518,7 +560,7 @@ if st.session_state['master_df'] is not None:
         else:
              df = df.sort_values(by='abs_bias')
         
-        tab1, tab2 = st.tabs(["📋 篩選結果列表", "📊 日K線技術分析"])
+        tab1, tab2 = st.tabs(["📋 篩選結果列表", "📊 日趨勢圖"])
         
         with tab1:
             def highlight_row(row):
@@ -534,7 +576,7 @@ if st.session_state['master_df'] is not None:
             )
 
         with tab2:
-            st.markdown("### 🔍 個股近半年日K線圖")
+            st.markdown("### 🔍 個股近半年趨勢圖")
             if len(df) > 0:
                 selected_stock_label = st.selectbox("請選擇一檔股票：", df['選股標籤'].tolist())
                 selected_row = df[df['選股標籤'] == selected_stock_label].iloc[0]
@@ -568,4 +610,4 @@ else:
             with sub_c2:
                  st.image("welcome.jpg", width=180)
         else:
-            st.info("💡 尚未偵測到 welcome.jpg，請將您的紫色招財圖上傳至 GitHub 並命名為 welcome.jpg，這裡就會顯示囉！")
+            st.info("💡 歡迎使用旺來-台股生命線系統！")
