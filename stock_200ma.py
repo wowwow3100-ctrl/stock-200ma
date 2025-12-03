@@ -8,30 +8,33 @@ import plotly.graph_objects as go
 import requests
 
 # --- 1. 網頁設定 ---
-VER = "ver3.0"
+VER = "ver3.1"
 st.set_page_config(page_title=f"🍍 旺來-台股生命線({VER})", layout="wide")
 
 # --- 2. 核心功能區 ---
 @st.cache_data(ttl=3600)
 def get_stock_list():
     """取得台股清單 (排除金融/ETF)"""
-    tse = twstock.twse
-    otc = twstock.tpex
-    stock_dict = {}
-    
-    exclude_industries = ['金融保險業', '存託憑證']
+    try:
+        tse = twstock.twse
+        otc = twstock.tpex
+        stock_dict = {}
+        
+        exclude_industries = ['金融保險業', '存託憑證']
 
-    for code, info in tse.items():
-        if info.type == '股票':
-            if info.group not in exclude_industries:
-                stock_dict[f"{code}.TW"] = {'name': info.name, 'code': code, 'group': info.group}
+        for code, info in tse.items():
+            if info.type == '股票':
+                if info.group not in exclude_industries:
+                    stock_dict[f"{code}.TW"] = {'name': info.name, 'code': code, 'group': info.group}
+                    
+        for code, info in otc.items():
+            if info.type == '股票':
+                if info.group not in exclude_industries:
+                    stock_dict[f"{code}.TWO"] = {'name': info.name, 'code': code, 'group': info.group}
                 
-    for code, info in otc.items():
-        if info.type == '股票':
-            if info.group not in exclude_industries:
-                stock_dict[f"{code}.TWO"] = {'name': info.name, 'code': code, 'group': info.group}
-            
-    return stock_dict
+        return stock_dict
+    except:
+        return {}
 
 def calculate_kd_values(df, n=9):
     try:
@@ -47,7 +50,7 @@ def calculate_kd_values(df, n=9):
     except:
         return 50, 50
 
-# --- 策略回測核心函數 ---
+# --- 策略回測核心函數 (新增月份分組與股名) ---
 def run_strategy_backtest(stock_dict, progress_bar):
     results = []
     all_tickers = list(stock_dict.keys())
@@ -74,7 +77,7 @@ def run_strategy_backtest(stock_dict, progress_bar):
                     df_h = df_h.to_frame(name=batch[0])
 
                 ma200_df = df_c.rolling(window=200).mean()
-                scan_window = df_c.index[-60:-10] 
+                scan_window = df_c.index[-90:-10] # 擴大掃描範圍至近3個月 (涵蓋9,10,11月)
                 
                 for ticker in df_c.columns:
                     try:
@@ -83,6 +86,9 @@ def run_strategy_backtest(stock_dict, progress_bar):
                         l_series = df_l[ticker]
                         h_series = df_h[ticker]
                         ma_series = ma200_df[ticker]
+                        
+                        # 取得股名
+                        stock_name = stock_dict.get(ticker, {}).get('name', ticker)
                         
                         for date in scan_window:
                             if pd.isna(ma_series[date]): continue
@@ -99,7 +105,7 @@ def run_strategy_backtest(stock_dict, progress_bar):
                             
                             if ma_val == 0 or prev_vol == 0: continue
 
-                            # 策略條件 (出量1.5倍 + 趨勢向上 + 站上)
+                            # 策略：接近 + 出量(1.5) + 站上 + 生命線向上
                             cond_near = (low_p <= ma_val * 1.03) and (low_p >= ma_val * 0.90) 
                             cond_vol = (vol > prev_vol * 1.5)
                             cond_up = (close_p > ma_val)
@@ -110,17 +116,18 @@ def run_strategy_backtest(stock_dict, progress_bar):
                                 max_price = future_highs.max()
                                 max_profit_pct = (max_price - close_p) / close_p * 100
                                 
-                                final_price = c_series.iloc[idx+10]
-                                final_ret_pct = (final_price - close_p) / close_p * 100
+                                # 為了分組，我們需要月份
+                                month_str = date.strftime('%m月')
                                 
                                 is_win = max_profit_pct >= 3.0
                                 
                                 results.append({
+                                    '月份': month_str,
                                     '代號': ticker.replace(".TW", "").replace(".TWO", ""),
+                                    '名稱': stock_name, # 新增股名
                                     '訊號日期': date.strftime('%Y-%m-%d'),
                                     '訊號價': round(close_p, 2),
-                                    '期間最高漲幅(%)': round(max_profit_pct, 2),
-                                    '持有兩週損益(%)': round(final_ret_pct, 2),
+                                    '最高漲幅(%)': round(max_profit_pct, 2),
                                     '結果': "Win 🏆" if is_win else "Loss 📉"
                                 })
                                 break 
@@ -130,11 +137,13 @@ def run_strategy_backtest(stock_dict, progress_bar):
             pass
         
         progress = (i + 1) / total_batches
-        progress_bar.progress(progress, text=f"深度回測中 (計算最高反彈)...({int(progress*100)}%)")
+        progress_bar.progress(progress, text=f"深度回測中 (計算分月數據)...({int(progress*100)}%)")
         
     return pd.DataFrame(results)
 
 def fetch_all_data(stock_dict, progress_bar, status_text):
+    if not stock_dict: return pd.DataFrame()
+    
     all_tickers = list(stock_dict.keys())
     BATCH_SIZE = 30
     total_batches = (len(all_tickers) // BATCH_SIZE) + 1
@@ -191,6 +200,7 @@ def fetch_all_data(stock_dict, progress_bar, status_text):
                             past_c = my_recent_c.iloc[:-1]
                             past_ma = my_recent_ma.iloc[:-1]
                             cond_past_down = (past_c < past_ma).any()
+                            
                             if cond_today_up and cond_past_down:
                                 is_treasure = True
 
@@ -208,7 +218,7 @@ def fetch_all_data(stock_dict, progress_bar, status_text):
                             '名稱': stock_info['name'],
                             '完整代號': ticker,
                             '收盤價': float(price),
-                            '200MA': float(ma200), # 修正 Key 為 200MA
+                            '生命線': float(ma200), # 欄位正名
                             '生命線趨勢': ma_trend,
                             '乖離率(%)': float(bias),
                             'abs_bias': abs(float(bias)),
@@ -247,7 +257,7 @@ def plot_stock_chart(ticker, name):
             x=plot_df['DateStr'], open=plot_df['Open'], high=plot_df['High'], low=plot_df['Low'], close=plot_df['Close'],
             name='日收盤價', increasing_line_color='red', decreasing_line_color='green'
         ))
-        fig.add_trace(go.Scatter(x=plot_df['DateStr'], y=plot_df['200MA'], line=dict(color='orange', width=2), name='生命線 (200MA)'))
+        fig.add_trace(go.Scatter(x=plot_df['DateStr'], y=plot_df['200MA'], line=dict(color='orange', width=2), name='生命線'))
 
         fig.update_layout(
             title=f"📊 {name} ({ticker}) 近半年日K線圖", yaxis_title='股價', height=600, hovermode="x unified",
@@ -321,7 +331,7 @@ with st.sidebar:
     st.divider()
     
     st.caption("⚠️ 注意：回測需調閱2年歷史資料，運算時間較長 (約2分鐘)。")
-    if st.button("🧪 策略回測 (近2週表現)"):
+    if st.button("🧪 策略回測 (近3個月表現)"):
         st.info("阿吉正在調閱過去2年的歷史檔案，進行深度驗證... (請稍候) ⏳")
         stock_dict = get_stock_list()
         bt_progress = st.progress(0, text="初始化回測...")
@@ -332,87 +342,85 @@ with st.sidebar:
         bt_progress.empty()
         st.success("回測完成！請查看下方結果。")
 
-    # --- 完整開發紀錄 ---
-    with st.expander("📅 完整版本開發紀錄 (History)"):
+    with st.expander("📅 版本開發紀錄"):
         st.markdown("""
-        **Ver 3.0 (Stability & History)**
-        - 修復：解決 KeyError (200MA) 錯誤，統一欄位名稱。
-        - 整理：收錄完整開發歷程。
-
-        **Ver 2.9 (Volume Relax)**
-        - 優化：回測「爆量」條件放寬為 1.5 倍 (出量)。
-        - 介面：新增回測等待提示。
-
-        **Ver 2.8 (Backtest Fix)**
-        - 修復：回測資料庫擴大至 2 年，確保 200MA 可計算。
-        - 修正：回測結果為 0 的問題。
-
-        **Ver 2.7 (Crash Proof)**
-        - 防呆：自動偵測舊版資料結構並提示更新。
-
-        **Ver 2.6 (Strategy Backtest)**
-        - 新增：獨立策略回測功能，驗證近 2 週績效。
-        - 視覺：歡迎畫面更換為客製化圖片。
-
-        **Ver 2.5 (No Chart)**
-        - 調整：暫時移除 K 線圖，專注於回測數據 (後續已加回)。
-
-        **Ver 2.4 (Chart Optimize)**
-        - 優化：K 線圖改為顯示近半年，解決顯示過密問題。
-
-        **Ver 2.3 (Rebranding)**
-        - 定名：正式命名為「🍍 旺來-台股生命線」。
-        - 文案：全面改為「開鎖寶箱」風格。
-
-        **Ver 2.2 (Emoji)**
-        - 視覺：下載動畫改為 Emoji，解決 GIF 讀取問題。
-
-        **Ver 2.0 - 2.1 (Animation)**
-        - 嘗試：引入 Lottie 動畫與 GIF，豐富視覺體驗。
-
-        **Ver 1.0 - 1.9 (Foundation)**
-        - 基礎：建立 200MA 運算核心、Streamlit 介面、雲端部署。
+        **Ver 3.1 (War Room Edition)**
+        - 回測升級：新增「按月分組」功能 (9月/10月/11月)，並顯示股名。
+        - 介面優化：修正篩選邏輯，避免無效操作。
+        - 品牌：全面更名為「生命線」。
         """)
 
-# 主畫面
+# 主畫面 - 回測報告
 if st.session_state['backtest_result'] is not None:
     bt_df = st.session_state['backtest_result']
     st.markdown("---")
     st.subheader("🧪 策略回測報告 (歷史訊號驗證)")
     
     if len(bt_df) > 0:
-        win_count = len(bt_df[bt_df['結果'].str.contains("Win")])
-        total_count = len(bt_df)
-        win_rate = int((win_count / total_count) * 100)
-        avg_max_ret = round(bt_df['期間最高漲幅(%)'].mean(), 2)
+        # 取得所有月份清單
+        months = sorted(bt_df['月份'].unique())
         
-        col1, col2, col3 = st.columns(3)
-        col1.metric("訊號觸發次數", total_count)
-        col2.metric("成功反彈機率 (反彈>3%)", f"{win_rate}%")
-        col3.metric("平均最高漲幅", f"{avg_max_ret}%")
+        # 建立分頁: 總覽 + 各月份
+        tabs = st.tabs(["📊 總覽"] + months)
         
-        def color_ret(val):
-            color = 'red' if val > 0 else 'green'
-            return f'color: {color}'
+        # --- 總覽頁面 ---
+        with tabs[0]:
+            win_count = len(bt_df[bt_df['結果'].str.contains("Win")])
+            total_count = len(bt_df)
+            win_rate = int((win_count / total_count) * 100)
+            avg_max_ret = round(bt_df['最高漲幅(%)'].mean(), 2)
             
-        st.dataframe(bt_df.style.map(color_ret, subset=['期間最高漲幅(%)', '持有兩週損益(%)']), use_container_width=True)
+            col1, col2, col3 = st.columns(3)
+            col1.metric("總觸發次數", total_count)
+            col2.metric("總平均勝率 (反彈>3%)", f"{win_rate}%")
+            col3.metric("總平均最高漲幅", f"{avg_max_ret}%")
+            st.dataframe(bt_df, use_container_width=True)
+
+        # --- 各月份頁面 ---
+        for i, m in enumerate(months):
+            with tabs[i+1]:
+                m_df = bt_df[bt_df['月份'] == m]
+                
+                m_win = len(m_df[m_df['結果'].str.contains("Win")])
+                m_total = len(m_df)
+                m_rate = int((m_win / m_total) * 100) if m_total > 0 else 0
+                m_avg = round(m_df['最高漲幅(%)'].mean(), 2) if m_total > 0 else 0
+                
+                c1, c2, c3 = st.columns(3)
+                c1.metric(f"{m} 觸發次數", m_total)
+                c2.metric(f"{m} 勝率", f"{m_rate}%")
+                c3.metric(f"{m} 平均漲幅", f"{m_avg}%")
+                
+                def color_ret(val):
+                    color = 'red' if val > 0 else 'green'
+                    return f'color: {color}'
+                st.dataframe(m_df.style.map(color_ret, subset=['最高漲幅(%)']), use_container_width=True)
+
     else:
-        st.warning("在此回測期間內，沒有股票符合條件。")
+        st.warning("在此回測期間內，沒有股票符合「接近生命線(向上) + 出量 + 站上」的條件。")
     st.markdown("---")
 
+# 主畫面 - 日常篩選
 if st.session_state['master_df'] is not None:
     df = st.session_state['master_df'].copy()
     
     # 防呆
-    if '完整代號' not in df.columns:
+    if '生命線' not in df.columns:
         st.error("⚠️ 資料結構已更新！請點擊左側紅色的 **「🔄 更新股價資料」** 按鈕。")
         st.stop()
 
     df = df[df['abs_bias'] <= bias_threshold]
     df = df[df['成交量'] >= (min_vol_input * 1000)]
     
-    if filter_trend_up: df = df[df['生命線趨勢'] == "⬆️向上"]
-    if filter_trend_down: df = df[df['生命線趨勢'] == "⬇️向下"]
+    # 趨勢篩選 (修正邏輯：分開處理，若同時勾選則顯示警告)
+    if filter_trend_up and filter_trend_down:
+        st.error("❌ 請勿同時勾選「生命線向上」與「生命線向下」，這兩個條件是互斥的！")
+        df = df[0:0] # 清空
+    elif filter_trend_up:
+        df = df[df['生命線趨勢'] == "⬆️向上"]
+    elif filter_trend_down:
+        df = df[df['生命線趨勢'] == "⬇️向下"]
+
     if filter_treasure: df = df[df['浴火重生'] == True]
     if filter_kd: df = df[df['K值'] > df['D值']]
     
@@ -422,7 +430,7 @@ if st.session_state['master_df'] is not None:
     if filter_ma_up: df = df[df['位置'] == "🟢生命線上"]
 
     if len(df) == 0:
-        st.warning(f"⚠️ 找不到符合條件的股票！\n\n請嘗試放寬乖離率範圍 (例如拉大到 5%) 或是取消部分勾選。")
+        st.warning(f"⚠️ 找不到符合條件的股票！")
     else:
         st.markdown(f"""
         <div style="background-color: #f0f2f6; padding: 15px; border-radius: 10px; text-align: center; border: 2px solid #ff4b4b;">
@@ -435,8 +443,7 @@ if st.session_state['master_df'] is not None:
         df['KD值'] = df.apply(lambda x: f"K:{int(x['K值'])} D:{int(x['D值'])}", axis=1)
         df['選股標籤'] = df['代號'] + " " + df['名稱']
         
-        # 修正欄位顯示名稱 200MA
-        display_cols = ['代號', '名稱', '收盤價', '200MA', '生命線趨勢', '乖離率(%)', '位置', 'KD值', '成交量(張)']
+        display_cols = ['代號', '名稱', '收盤價', '生命線', '生命線趨勢', '乖離率(%)', '位置', 'KD值', '成交量(張)']
         if filter_treasure:
              df = df.sort_values(by='成交量', ascending=False)
         else:
@@ -469,8 +476,7 @@ if st.session_state['master_df'] is not None:
                 
                 col1, col2, col3 = st.columns(3)
                 col1.metric("目前股價", selected_row['收盤價'])
-                # 修復這裡的 Key 錯誤
-                col2.metric("生命線 (200MA)", selected_row['200MA'], delta=f"{selected_row['乖離率(%)']}%")
+                col2.metric("生命線", selected_row['生命線'], delta=f"{selected_row['乖離率(%)']}%")
                 col3.metric("KD指標", selected_row['KD值'])
 
 else:
