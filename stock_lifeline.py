@@ -9,7 +9,7 @@ import requests
 import os
 
 # --- 1. 網頁設定 ---
-VER = "ver3.9_Fix"
+VER = "ver4.0"
 st.set_page_config(page_title=f"🍍 旺來-台股生命線({VER})", layout="wide")
 
 # --- 2. 核心功能區 ---
@@ -51,8 +51,15 @@ def calculate_kd_values(df, n=9):
     except:
         return 50, 50
 
-# --- 策略回測核心函數 ---
-def run_strategy_backtest(stock_dict, progress_bar):
+# --- 策略回測核心函數 (動態連動版) ---
+def run_strategy_backtest(stock_dict, progress_bar, use_trend_up, use_treasure, use_vol):
+    """
+    動態回測：根據使用者勾選的條件進行歷史驗證
+    params:
+        use_trend_up: 是否限制生命線向上
+        use_treasure: 是否使用挖寶(假跌破)邏輯
+        use_vol: 是否限制出量
+    """
     results = []
     all_tickers = list(stock_dict.keys())
     BATCH_SIZE = 50 
@@ -78,7 +85,7 @@ def run_strategy_backtest(stock_dict, progress_bar):
                     df_h = df_h.to_frame(name=batch[0])
 
                 ma200_df = df_c.rolling(window=200).mean()
-                scan_window = df_c.index[-90:-10] 
+                scan_window = df_c.index[-90:-10] # 掃描近3個月
                 
                 for ticker in df_c.columns:
                     try:
@@ -105,18 +112,48 @@ def run_strategy_backtest(stock_dict, progress_bar):
                             
                             if ma_val == 0 or prev_vol == 0: continue
 
-                            cond_near = (low_p <= ma_val * 1.03) and (low_p >= ma_val * 0.90) 
-                            cond_vol = (vol > prev_vol * 1.5)
-                            cond_up = (close_p > ma_val)
-                            cond_trend = (ma_val > ma_val_20ago)
+                            # --- 動態策略條件 ---
+                            is_match = False
                             
-                            if cond_near and cond_vol and cond_up and cond_trend:
+                            # 1. 趨勢濾網 (如果勾選)
+                            if use_trend_up and (ma_val <= ma_val_20ago):
+                                continue # 趨勢不對就跳過
+
+                            # 2. 出量濾網 (如果勾選)
+                            if use_vol and (vol <= prev_vol * 1.5):
+                                continue # 量不夠就跳過
+
+                            # 3. 型態判斷 (挖寶 vs 一般站上)
+                            if use_treasure:
+                                # 挖寶邏輯：過去7天有跌破，今天站上
+                                # 取得過去 8 天資料 (含今天)
+                                start_idx = idx - 7
+                                if start_idx < 0: continue
+                                recent_c = c_series.iloc[start_idx : idx+1]
+                                recent_ma = ma_series.iloc[start_idx : idx+1]
+                                
+                                # 今天站上
+                                cond_today_up = recent_c.iloc[-1] > recent_ma.iloc[-1]
+                                # 過去7天(不含今天)有跌破
+                                past_c = recent_c.iloc[:-1]
+                                past_ma = recent_ma.iloc[:-1]
+                                cond_past_down = (past_c < past_ma).any()
+                                
+                                if cond_today_up and cond_past_down:
+                                    is_match = True
+                            else:
+                                # 一般邏輯：接近生命線 + 站上
+                                cond_near = (low_p <= ma_val * 1.03) and (low_p >= ma_val * 0.90) 
+                                cond_up = (close_p > ma_val)
+                                if cond_near and cond_up:
+                                    is_match = True
+                            
+                            if is_match:
                                 future_highs = h_series.iloc[idx+1 : idx+11]
                                 max_price = future_highs.max()
                                 max_profit_pct = (max_price - close_p) / close_p * 100
                                 
                                 month_str = date.strftime('%m月')
-                                
                                 is_win = max_profit_pct >= 3.0
                                 
                                 results.append({
@@ -135,7 +172,7 @@ def run_strategy_backtest(stock_dict, progress_bar):
             pass
         
         progress = (i + 1) / total_batches
-        progress_bar.progress(progress, text=f"深度回測中 (計算分月數據)...({int(progress*100)}%)")
+        progress_bar.progress(progress, text=f"深度回測中 (條件連動分析)...({int(progress*100)}%)")
         
     return pd.DataFrame(results)
 
@@ -326,7 +363,6 @@ with st.sidebar:
     st.subheader("進階條件")
     
     filter_trend_up = st.checkbox("📈 生命線向上 (多方助漲)", value=False)
-    # 修正重點：確保這行字串是完整的
     filter_trend_down = st.checkbox("📉 生命線向下 (空方壓力)", value=False)
     
     filter_treasure = st.checkbox("🔥 浴火重生 (假跌破拉回)", value=False)
@@ -338,12 +374,20 @@ with st.sidebar:
     st.divider()
     
     st.caption("⚠️ 注意：回測需調閱2年歷史資料，運算時間較長 (約2分鐘)。")
+    # --- 關鍵修改：將按鈕變數傳入回測函數 ---
     if st.button("🧪 策略回測 (近3個月表現)"):
         st.info("阿吉正在調閱過去2年的歷史檔案，進行深度驗證... (請稍候) ⏳")
         stock_dict = get_stock_list()
         bt_progress = st.progress(0, text="初始化回測...")
         
-        bt_df = run_strategy_backtest(stock_dict, bt_progress)
+        # 傳遞使用者目前的勾選狀態給回測系統
+        bt_df = run_strategy_backtest(
+            stock_dict, 
+            bt_progress, 
+            use_trend_up=filter_trend_up, 
+            use_treasure=filter_treasure, 
+            use_vol=filter_vol_double
+        )
         
         st.session_state['backtest_result'] = bt_df
         bt_progress.empty()
@@ -351,19 +395,27 @@ with st.sidebar:
 
     with st.expander("📅 系統開發日誌 (Changelog)"):
         st.markdown("""
-        ### Ver 3.9 (Final Polish)
-        * **UI/UX**: 歡迎詞改為深色文字 (#333333) 以適應白底，並加粗強調。
-        * **Visual**: 圖片進一步縮小至 180px，並完美置中。
+        ### Ver 4.0 (Dynamic Backtest)
+        * **Feature**: 策略回測現在會**連動**側邊欄的篩選條件。
+            * 勾選「生命線向上」➜ 回測時過濾下降趨勢。
+            * 勾選「浴火重生」➜ 回測時改抓假跌破型態。
+            * 勾選「出量」➜ 回測時加入量能濾網。
 
-        ### Ver 3.8 (Image Fix)
-        * **Fix**: 改回使用原生 `st.image` 修復圖片路徑。
+        ### Ver 3.9 (Visual Polish)
+        * **UI/UX**: 歡迎畫面美化，字體加深，圖片置中。
         """)
 
 # 主畫面 - 回測報告
 if st.session_state['backtest_result'] is not None:
     bt_df = st.session_state['backtest_result']
     st.markdown("---")
-    st.subheader("🧪 策略回測報告 (歷史訊號驗證)")
+    
+    # 根據勾選狀態顯示動態標題
+    strategy_name = "基礎策略"
+    if filter_treasure: strategy_name = "浴火重生(假跌破)"
+    elif filter_trend_up: strategy_name = "趨勢向上 + 支撐"
+    
+    st.subheader(f"🧪 策略回測報告：{strategy_name} (歷史訊號驗證)")
     
     if len(bt_df) > 0:
         months = sorted(bt_df['月份'].unique())
@@ -402,7 +454,7 @@ if st.session_state['backtest_result'] is not None:
                 st.dataframe(m_df.style.map(color_ret, subset=['最高漲幅(%)']), use_container_width=True)
 
     else:
-        st.warning("在此回測期間內，沒有股票符合「接近生命線(向上) + 出量 + 站上」的條件。")
+        st.warning("在此回測期間內，沒有股票符合您目前勾選的條件組合。")
     st.markdown("---")
 
 # 主畫面 - 日常篩選
@@ -484,10 +536,9 @@ if st.session_state['master_df'] is not None:
 else:
     st.warning("👈 請先點擊左側 sidebar 的 **「🔄 更新股價資料」** 按鈕開始挖寶！")
     
-    col1, col2, col3 = st.columns([1, 2, 1]) # 中間欄位
+    col1, col2, col3 = st.columns([1, 2, 1])
     with col2:
         if os.path.exists("welcome.jpg"):
-            # 1. 顯示文字 (深色 #333333，加粗)
             st.markdown(
                 """
                 <div style="text-align: center; color: #333333; font-size: 1.1em; margin-bottom: 20px; line-height: 1.6; font-weight: bold;">
@@ -498,7 +549,6 @@ else:
                 """,
                 unsafe_allow_html=True
             )
-            # 2. 顯示圖片 (縮小至 180px 並利用 nest columns 置中)
             sub_c1, sub_c2, sub_c3 = st.columns([1, 1, 1])
             with sub_c2:
                  st.image("welcome.jpg", width=180)
