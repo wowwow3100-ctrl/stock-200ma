@@ -9,7 +9,7 @@ import requests
 import os
 
 # --- 1. 網頁設定 ---
-VER = "ver3.6"
+VER = "ver3.7"
 st.set_page_config(page_title=f"🍍 旺來-台股生命線({VER})", layout="wide")
 
 # --- 2. 核心功能區 ---
@@ -350,23 +350,15 @@ with st.sidebar:
 
     with st.expander("📅 系統開發日誌 (Changelog)"):
         st.markdown("""
-        ### Ver 3.6 (Visual Polish)
-        * **UI/UX**: 優化歡迎畫面，縮小圖片比例並採用亮金色文字，提升視覺質感與閱讀性。
+        ### Ver 3.7 (Layout & Color)
+        * **UI/UX**: 將歡迎詞移至圖片上方，並改為亮白色文字以提升閱讀性。
+        * **Visual**: 圖片固定為 300px 寬度，呈現精緻小巧的視覺效果。
 
-        ### Ver 3.5 (Aesthetics & Image Patch)
-        * **UI/UX**: 介面極簡化，移除冗餘選項與標題。
-        * **Asset**: 改用本地 `welcome.jpg` 讀取機制，修復外部連結失效問題。
+        ### Ver 3.5 - 3.6 (Aesthetics)
+        * **UI/UX**: 介面極簡化，改用本地 `welcome.jpg` 讀取機制。
 
         ### Ver 3.x Series (Analytics Core)
         * **Ver 3.1 - 3.2**: 實裝月份分組 (Grouping) 回測報表。
-        * **Algorithm Refinement**:
-            ```python
-            # LifeLine Strategy Logic
-            def check_signal(price, volume, lifeline, slope):
-                # 趨勢向上 + 爆量 + 站穩
-                if slope > 0 and volume > 1.5 * prev_volume and price > lifeline:
-                    return "Signal Detected"
-            ```
         """)
 
 # 主畫面 - 回測報告
@@ -494,15 +486,14 @@ if st.session_state['master_df'] is not None:
 else:
     st.warning("👈 請先點擊左側 sidebar 的 **「🔄 更新股價資料」** 按鈕開始挖寶！")
     
-    # --- 修改這裡：縮小圖片並使用金色文字 ---
-    col1, col2, col3 = st.columns([2, 1, 2]) # 將中間欄位變窄 (1/5 寬度)
+    # --- 修改這裡：白字在上，小圖在下 ---
+    col1, col2, col3 = st.columns([1, 2, 1]) # 使用中間欄位
     with col2:
         if os.path.exists("welcome.jpg"):
-            st.image("welcome.jpg", use_column_width=True)
-            # 使用 HTML 設定金色文字
+            # 1. 先顯示文字 (亮白色)
             st.markdown(
                 """
-                <div style="text-align: center; color: #FFD700; font-size: 1em; margin-top: 15px; line-height: 1.5;">
+                <div style="text-align: center; color: #FFFFFF; font-size: 1.1em; margin-bottom: 20px; line-height: 1.6;">
                     這是數年來的經驗收納<br>
                     此工具僅供參考，不代表投資建議<br>
                     預祝心想事成，從從容容，紫氣東來! 🟣✨
@@ -510,5 +501,15 @@ else:
                 """,
                 unsafe_allow_html=True
             )
+            # 2. 再顯示圖片 (定寬 300px，並置中)
+            st.markdown(
+                """
+                <div style="display: flex; justify-content: center;">
+                    <img src="app/static/welcome.jpg" width="300" style="border-radius: 10px;">
+                </div>
+                """,
+                 unsafe_allow_html=True
+            )
+            # 備註：Streamlit Cloud 上需要用這種 HTML 方式來強制置中和定寬本地圖片
         else:
             st.info("💡 小提醒：請將您的紫色招財圖上傳至 GitHub 並命名為 welcome.jpg，這裡就會顯示囉！")
