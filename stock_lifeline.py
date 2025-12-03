@@ -9,7 +9,7 @@ import requests
 import os
 
 # --- 1. 網頁設定 ---
-VER = "ver3.7"
+VER = "ver3.8"
 st.set_page_config(page_title=f"🍍 旺來-台股生命線({VER})", layout="wide")
 
 # --- 2. 核心功能區 ---
@@ -350,8 +350,11 @@ with st.sidebar:
 
     with st.expander("📅 系統開發日誌 (Changelog)"):
         st.markdown("""
+        ### Ver 3.8 (Image Fix)
+        * **Fix**: 改回使用原生 `st.image`，修復 HTML 圖片路徑問題。
+        * **UI**: 調整版面為「文字在上、圖片在下」，文字使用亮白色。
+
         ### Ver 3.7 (Layout & Color)
-        * **UI/UX**: 將歡迎詞移至圖片上方，並改為亮白色文字以提升閱讀性。
         * **Visual**: 圖片固定為 300px 寬度，呈現精緻小巧的視覺效果。
 
         ### Ver 3.5 - 3.6 (Aesthetics)
@@ -486,11 +489,11 @@ if st.session_state['master_df'] is not None:
 else:
     st.warning("👈 請先點擊左側 sidebar 的 **「🔄 更新股價資料」** 按鈕開始挖寶！")
     
-    # --- 修改這裡：白字在上，小圖在下 ---
-    col1, col2, col3 = st.columns([1, 2, 1]) # 使用中間欄位
+    # --- 修改這裡：文字在上 + 原生 st.image (最穩) ---
+    col1, col2, col3 = st.columns([1, 2, 1]) # 中間欄位
     with col2:
         if os.path.exists("welcome.jpg"):
-            # 1. 先顯示文字 (亮白色)
+            # 1. 顯示文字 (亮白色)
             st.markdown(
                 """
                 <div style="text-align: center; color: #FFFFFF; font-size: 1.1em; margin-bottom: 20px; line-height: 1.6;">
@@ -501,15 +504,7 @@ else:
                 """,
                 unsafe_allow_html=True
             )
-            # 2. 再顯示圖片 (定寬 300px，並置中)
-            st.markdown(
-                """
-                <div style="display: flex; justify-content: center;">
-                    <img src="app/static/welcome.jpg" width="300" style="border-radius: 10px;">
-                </div>
-                """,
-                 unsafe_allow_html=True
-            )
-            # 備註：Streamlit Cloud 上需要用這種 HTML 方式來強制置中和定寬本地圖片
+            # 2. 顯示圖片 (指定寬度 300)
+            st.image("welcome.jpg", width=300)
         else:
-            st.info("💡 小提醒：請將您的紫色招財圖上傳至 GitHub 並命名為 welcome.jpg，這裡就會顯示囉！")
+            st.info("💡 尚未偵測到 welcome.jpg，請將您的紫色招財圖上傳至 GitHub 並命名為 welcome.jpg，這裡就會顯示囉！")
