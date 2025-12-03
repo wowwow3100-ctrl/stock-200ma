@@ -6,9 +6,10 @@ import time
 from datetime import datetime
 import plotly.graph_objects as go
 import requests
+import os # 新增 os 模組用來檢查圖片是否存在
 
 # --- 1. 網頁設定 ---
-VER = "ver3.2"
+VER = "ver3.4"
 st.set_page_config(page_title=f"🍍 旺來-台股生命線({VER})", layout="wide")
 
 # --- 2. 核心功能區 ---
@@ -275,10 +276,9 @@ if 'backtest_result' not in st.session_state:
     st.session_state['backtest_result'] = None
 
 with st.sidebar:
-    st.header("1. 資料庫管理")
+    st.header("資料庫管理")
     
-    # 強制重置快取按鈕 (修復卡住問題)
-    if st.button("🚨 強制重置系統 (卡住請按我)"):
+    if st.button("🚨 強制重置系統"):
         st.cache_data.clear()
         st.session_state.clear()
         st.success("系統已重置！請重新點擊更新股價。")
@@ -333,7 +333,6 @@ with st.sidebar:
     
     filter_kd = st.checkbox("KD 黃金交叉 (K > D)", value=False)
     filter_vol_double = st.checkbox("出量 (今日 > 昨日x1.5)", value=False)
-    filter_ma_up = st.checkbox("只看站上生命線 (多方)", value=False)
     
     st.divider()
     
@@ -349,16 +348,18 @@ with st.sidebar:
         bt_progress.empty()
         st.success("回測完成！請查看下方結果。")
 
-    with st.expander("📅 版本開發紀錄"):
+    with st.expander("📅 版本開發紀錄 (System Changelog)"):
         st.markdown("""
-        **Ver 3.2 (Image & DB Fix)**
-        - 修復：歡迎畫面圖片連結更新，解決無法顯示問題。
-        - 系統：加入強制重置按鈕，解決舊資料卡住導致的錯誤。
+        #### Ver 3.4 (Purple East)
+        * **Visual**: 歡迎畫面更換為「紫氣東來」招財符，象徵財運亨通。
+        * **Stable**: 改用本地圖檔讀取機制，徹底解決圖片連結失效問題。
 
-        **Ver 3.1 (War Room Edition)**
-        - 回測升級：新增「按月分組」功能 (9月/10月/11月)，並顯示股名。
-        - 介面優化：修正篩選邏輯，避免無效操作。
-        - 品牌：全面更名為「生命線」。
+        #### Ver 3.3 (UI Polishing)
+        * **Optimization**: 介面極簡化，移除多餘標題與選項。
+
+        #### Ver 2.x Series (Strategy Engine)
+        * **Ver 2.8 - 2.9**: 策略核心更新 (1.5倍出量、2年回測數據)。
+        * **Ver 2.6**: 實裝獨立回測模組。
         """)
 
 # 主畫面 - 回測報告
@@ -433,8 +434,6 @@ if st.session_state['master_df'] is not None:
     if filter_vol_double: 
         df = df[df['成交量'] > (df['昨日成交量'] * 1.5)]
         
-    if filter_ma_up: df = df[df['位置'] == "🟢生命線上"]
-
     if len(df) == 0:
         st.warning(f"⚠️ 找不到符合條件的股票！")
     else:
@@ -488,8 +487,11 @@ if st.session_state['master_df'] is not None:
 else:
     st.warning("👈 請先點擊左側 sidebar 的 **「🔄 更新股價資料」** 按鈕開始挖寶！")
     
-    # 這裡換上新的穩定圖片連結
-    custom_image_url = "https://images.unsplash.com/photo-1611974765270-ca1258634369?ixlib=rb-4.0.3&auto=format&fit=crop&w=1000&q=80"
+    # --- 這裡使用剛剛上傳的圖片 ---
     col1, col2, col3 = st.columns([1, 2, 1])
     with col2:
-        st.image(custom_image_url, caption="祝您操作順利，天天漲停板，寶箱開不完！🚀💰")
+        # 如果檔案存在才顯示，避免報錯
+        if os.path.exists("welcome.jpg"):
+            st.image("welcome.jpg", caption="這是數年來的經驗收納\n此工具僅供參考，不代表投資建議\n預祝心想事成，從從容容，紫氣東來!")
+        else:
+            st.info("💡 小提醒：請將您的圖片上傳到 GitHub 並命名為 welcome.jpg，這裡就會顯示囉！")
