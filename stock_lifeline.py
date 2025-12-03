@@ -206,3 +206,124 @@ def fetch_all_data(stock_dict, progress_bar, status_text):
                         k_val, d_val = 0, 0
                         if len(stock_df) >= 9:
                             k_val, d_val = calculate_kd_values(stock_df)
+
+                        bias = ((price - ma200) / ma200) * 100
+                        stock_info = stock_dict.get(ticker)
+                        if not stock_info: continue
+
+                        raw_data_list.append({
+                            '代號': stock_info['code'],
+                            '名稱': stock_info['name'],
+                            '完整代號': ticker,
+                            '收盤價': float(price),
+                            '生命線': float(ma200),
+                            '生命線趨勢': ma_trend,
+                            '乖離率(%)': float(bias),
+                            'abs_bias': abs(float(bias)),
+                            '成交量': int(vol),
+                            '昨日成交量': int(prev_vol),
+                            'K值': float(k_val),
+                            'D值': float(d_val),
+                            '位置': "🟢生命線上" if price >= ma200 else "🔴生命線下",
+                            '浴火重生': is_treasure
+                        })
+                    except: continue
+        except: pass
+        
+        current_progress = (i + 1) / total_batches
+        progress_bar.progress(current_progress, text=f"系統正在努力挖掘寶藏中...({int(current_progress*100)}%)")
+        time.sleep(0.05)
+    
+    return pd.DataFrame(raw_data_list)
+
+def plot_stock_chart(ticker, name):
+    try:
+        df = yf.download(ticker, period="1y", interval="1d", progress=False, auto_adjust=False)
+        if df.index.tz is not None: df.index = df.index.tz_localize(None)
+        df = df[df['Volume'] > 0].dropna()
+        if df.empty:
+            st.error("無法取得有效數據")
+            return
+
+        df['200MA'] = df['Close'].rolling(window=200).mean()
+        
+        plot_df = df.tail(120).copy()
+        plot_df['DateStr'] = plot_df.index.strftime('%Y-%m-%d')
+
+        fig = go.Figure()
+        fig.add_trace(go.Candlestick(
+            x=plot_df['DateStr'], open=plot_df['Open'], high=plot_df['High'], low=plot_df['Low'], close=plot_df['Close'],
+            name='日收盤價', increasing_line_color='red', decreasing_line_color='green'
+        ))
+        fig.add_trace(go.Scatter(x=plot_df['DateStr'], y=plot_df['200MA'], line=dict(color='orange', width=2), name='生命線'))
+
+        fig.update_layout(
+            title=f"📊 {name} ({ticker}) 近半年日K線圖", yaxis_title='股價', height=600, hovermode="x unified",
+            xaxis=dict(type='category', tickangle=-45, nticks=20), xaxis_rangeslider_visible=False
+        )
+        st.plotly_chart(fig, use_container_width=True)
+    except Exception as e: st.error(f"繪圖失敗: {e}")
+
+# --- 3. 介面顯示區 ---
+st.title(f"🍍 {VER} 旺來-台股生命線")
+st.markdown("---")
+
+if 'master_df' not in st.session_state:
+    st.session_state['master_df'] = None
+if 'last_update' not in st.session_state:
+    st.session_state['last_update'] = None
+if 'backtest_result' not in st.session_state:
+    st.session_state['backtest_result'] = None
+
+with st.sidebar:
+    st.header("資料庫管理")
+    
+    if st.button("🚨 強制重置系統"):
+        st.cache_data.clear()
+        st.session_state.clear()
+        st.success("系統已重置！請重新點擊更新股價。")
+        st.rerun()
+
+    if st.button("🔄 更新股價資料 (開市請按我)", type="primary"):
+        stock_dict = get_stock_list()
+        
+        if not stock_dict:
+            st.error("無法取得股票清單，請稍後再試或按上方重置按鈕。")
+        else:
+            placeholder_emoji = st.empty() 
+            with placeholder_emoji:
+                st.markdown("""
+                    <div style="text-align: center; font-size: 40px; animation: blink 1s infinite;">
+                        🎁💰✨
+                    </div>
+                    <style>
+                    @keyframes blink { 0% { opacity: 1; } 50% { opacity: 0.5; } 100% { opacity: 1; } }
+                    </style>
+                    <div style="text-align: center;">正在開鎖寶箱...</div>
+                """, unsafe_allow_html=True)
+            
+            status_text = st.empty()
+            progress_bar = st.progress(0, text="準備下載...")
+            
+            df = fetch_all_data(stock_dict, progress_bar, status_text)
+            
+            placeholder_emoji.empty()
+            
+            st.session_state['master_df'] = df
+            st.session_state['last_update'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            progress_bar.empty()
+            st.success(f"更新完成！共 {len(df)} 檔資料")
+        
+    if st.session_state['last_update']:
+        st.caption(f"最後更新：{st.session_state['last_update']}")
+    
+    st.divider()
+    st.header("2. 即時篩選器")
+    bias_threshold = st.slider("乖離率範圍 (±%)", 0.5, 5.0, 2.5, step=0.1)
+    st.caption("設定股價距離「生命線」多近視為符合條件。")
+    min_vol_input = st.number_input("最低成交量 (張)", value=1000, step=100)
+    
+    st.subheader("進階條件")
+    
+    filter_trend_up = st.checkbox("📈 生命線向上 (多方助漲)", value=False)
+    filter_trend_down = st.checkbox("📉 生命線向下
