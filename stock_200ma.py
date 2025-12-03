@@ -8,7 +8,7 @@ import plotly.graph_objects as go
 import requests
 
 # --- 1. 網頁設定 ---
-VER = "ver2.6"
+VER = "ver2.7"
 st.set_page_config(page_title=f"🍍 旺來-台股生命線({VER})", layout="wide")
 
 # --- 2. 核心功能區 ---
@@ -47,31 +47,20 @@ def calculate_kd_values(df, n=9):
     except:
         return 50, 50
 
-# --- 策略回測核心函數 (獨立運作) ---
+# --- 策略回測核心函數 ---
 def run_strategy_backtest(stock_dict, progress_bar):
-    """
-    執行策略回測：
-    條件：
-    1. 接近生命線 (Low <= 200MA * 1.02)
-    2. 出量 (Volume > 2 * 昨日Volume)
-    3. 脫離/站上 (Close > 200MA)
-    驗證：
-    兩週後 (10個交易日) 的漲跌幅
-    """
+    """回測：接近生命線+爆量+站上，兩週後的表現"""
     results = []
     all_tickers = list(stock_dict.keys())
-    # 為了省時，這裡可以設一個上限，或是跑全台股(會比較久)
-    # 這裡示範跑全台股，但批次處理
+    # 為了演示速度，這邊設定批次跑
     BATCH_SIZE = 50 
     total_batches = (len(all_tickers) // BATCH_SIZE) + 1
     
     for i, batch_idx in enumerate(range(0, len(all_tickers), BATCH_SIZE)):
         batch = all_tickers[batch_idx : batch_idx + BATCH_SIZE]
         try:
-            # 下載過去半年的資料即可，不用太多
             data = yf.download(batch, period="6mo", interval="1d", progress=False, auto_adjust=False)
             if not data.empty:
-                # 處理多層索引
                 try:
                     df_c = data['Close']
                     df_v = data['Volume']
@@ -79,34 +68,25 @@ def run_strategy_backtest(stock_dict, progress_bar):
                 except KeyError:
                     continue
                 
-                # 格式統一
                 if isinstance(df_c, pd.Series):
                     df_c = df_c.to_frame(name=batch[0])
                     df_v = df_v.to_frame(name=batch[0])
                     df_l = df_l.to_frame(name=batch[0])
 
-                # 計算指標
                 ma200_df = df_c.rolling(window=200).mean()
-                
-                # 掃描視窗：過去 60 天 ~ 過去 10 天 (預留 10 天看結果)
-                # 這樣才能算出 "兩週後的漲跌"
-                scan_window = df_c.index[-60:-10] 
+                scan_window = df_c.index[-60:-10] # 掃描區間
                 
                 for ticker in df_c.columns:
                     try:
-                        # 取出該股數據
                         c_series = df_c[ticker]
                         v_series = df_v[ticker]
                         l_series = df_l[ticker]
                         ma_series = ma200_df[ticker]
                         
-                        # 在時間窗內尋找訊號
                         for date in scan_window:
                             if pd.isna(ma_series[date]): continue
                             
                             idx = c_series.index.get_loc(date)
-                            
-                            # 取得當日數據
                             close_p = c_series.iloc[idx]
                             low_p = l_series.iloc[idx]
                             vol = v_series.iloc[idx]
@@ -115,16 +95,12 @@ def run_strategy_backtest(stock_dict, progress_bar):
                             
                             if ma_val == 0: continue
 
-                            # --- 策略條件 ---
-                            # 1. 接近生命線 (最低價碰到或在線上方 2% 內)
+                            # 策略：1.接近 2.爆量 3.站上
                             cond_near = (low_p <= ma_val * 1.02) and (low_p >= ma_val * 0.90) 
-                            # 2. 爆量 (大於昨日 2 倍)
                             cond_vol = (vol > prev_vol * 2)
-                            # 3. 站上/脫離 (收盤在線上)
                             cond_up = (close_p > ma_val)
                             
                             if cond_near and cond_vol and cond_up:
-                                # 訊號觸發！檢查 10 天後股價
                                 future_price = c_series.iloc[idx+10]
                                 ret_pct = (future_price - close_p) / close_p * 100
                                 
@@ -136,14 +112,12 @@ def run_strategy_backtest(stock_dict, progress_bar):
                                     '兩週漲跌幅(%)': round(ret_pct, 2),
                                     '結果': "Win 🏆" if ret_pct > 0 else "Loss 📉"
                                 })
-                                # 找到一個訊號就換下一檔，避免同一檔重複計算太多次(可選)
                                 break 
                     except:
                         continue
         except:
             pass
         
-        # 更新進度
         progress = (i + 1) / total_batches
         progress_bar.progress(progress, text=f"正在回測歷史數據...({int(progress*100)}%)")
         
@@ -215,7 +189,7 @@ def fetch_all_data(stock_dict, progress_bar, status_text):
                         raw_data_list.append({
                             '代號': stock_info['code'],
                             '名稱': stock_info['name'],
-                            '完整代號': ticker,
+                            '完整代號': ticker, # 這裡是關鍵！ver2.6/2.7 必須有這個
                             '收盤價': float(price),
                             '200MA': float(ma200),
                             '乖離率(%)': float(bias),
@@ -247,7 +221,6 @@ def plot_stock_chart(ticker, name):
 
         df['200MA'] = df['Close'].rolling(window=200).mean()
         
-        # 只顯示近半年 (120天)
         plot_df = df.tail(120).copy()
         plot_df['DateStr'] = plot_df.index.strftime('%Y-%m-%d')
 
@@ -316,7 +289,6 @@ with st.sidebar:
     min_vol_input = st.number_input("最低成交量 (張)", value=1000, step=100)
     
     st.subheader("進階條件")
-    # 修改變數與顯示文字
     filter_treasure = st.checkbox("🎁 挖寶中 (假跌破拉回)", value=False)
     st.caption("🔍 尋找過去7日內曾跌破，但今日站回生命線的強勢股")
     filter_kd = st.checkbox("KD 黃金交叉 (K > D)", value=False)
@@ -325,13 +297,12 @@ with st.sidebar:
     
     st.divider()
     
-    # --- 新增：獨立的回測按鈕 ---
+    # 獨立的回測按鈕
     if st.button("🧪 執行策略回測 (近2週表現)"):
         st.info("正在回溯歷史數據驗證策略，這需要一點時間 (約 1-2 分鐘)，請喝口茶稍等...🍵")
         stock_dict = get_stock_list()
         bt_progress = st.progress(0, text="初始化回測...")
         
-        # 執行回測
         bt_df = run_strategy_backtest(stock_dict, bt_progress)
         
         st.session_state['backtest_result'] = bt_df
@@ -340,13 +311,11 @@ with st.sidebar:
 
     with st.expander("📅 版本開發紀錄"):
         st.markdown("""
-        **Ver 2.6 (Backtest)**
-        - 新增：獨立策略回測功能，驗證「爆量站上生命線」的後續兩週漲幅。
-        - 修正：更名為「挖寶中」。
+        **Ver 2.7 (Crash Proof)**
+        - 修復：自動偵測舊版資料導致的 KeyError，提示使用者更新。
         """)
 
 # 主畫面
-# 1. 顯示回測結果 (如果有的話)
 if st.session_state['backtest_result'] is not None:
     bt_df = st.session_state['backtest_result']
     st.markdown("---")
@@ -363,7 +332,6 @@ if st.session_state['backtest_result'] is not None:
         col2.metric("兩週上漲機率 (勝率)", f"{win_rate}%")
         col3.metric("平均報酬率", f"{avg_ret}%")
         
-        # 顯示詳細表格
         def color_ret(val):
             color = 'red' if val > 0 else 'green'
             return f'color: {color}'
@@ -373,10 +341,16 @@ if st.session_state['backtest_result'] is not None:
         st.warning("在此期間內，沒有股票符合「接近生命線 + 爆量 + 站上」的嚴格條件。")
     st.markdown("---")
 
-# 2. 顯示日常篩選
 if st.session_state['master_df'] is not None:
     df = st.session_state['master_df'].copy()
     
+    # --- 關鍵修復：防呆機制 ---
+    # 如果發現舊版資料(沒有完整代號)，強制停止並提示更新
+    if '完整代號' not in df.columns:
+        st.error("⚠️ 偵測到您的資料庫是舊版本的 (缺少圖表數據)！")
+        st.warning("👉 請點擊左側紅色的 **「🔄 更新股價資料」** 按鈕，讓阿吉幫您下載最新格式的資料，問題就會解決囉！")
+        st.stop() # 停止執行後面的程式，防止報錯
+
     df = df[df['abs_bias'] <= bias_threshold]
     df = df[df['成交量'] >= (min_vol_input * 1000)]
     
@@ -438,7 +412,7 @@ if st.session_state['master_df'] is not None:
 else:
     st.warning("👈 請先點擊左側 sidebar 的 **「🔄 更新股價資料」** 按鈕開始挖寶！")
     
-    chest_explode_url = "https://cdn.pixabay.com/animation/2023/02/09/21/29/chest-7779776_512.gif"
+    custom_image_url = "https://i.imgur.com/8uQGz5D.jpeg"
     col1, col2, col3 = st.columns([1, 2, 1])
     with col2:
-        st.image(chest_explode_url, caption="💰 準備好了嗎？點擊左上角開始挖寶！")
+        st.image(custom_image_url, caption="祝您操作順利，天天漲停板，寶箱開不完！🚀💰")
