@@ -484,4 +484,156 @@ with st.sidebar:
     if st.button("🚨 強制重置系統"):
         st.cache_data.clear()
         st.session_state.clear()
-        st.rerun
+        st.rerun()
+
+    # --- 調整：招呼語移到更新按鈕前 ---
+    st.info("💡 歡迎使用旺來-台股生命線系統！")
+    
+    if st.button("🔄 更新股價資料 (開市請按我)", type="primary"):
+        stock_dict = get_stock_list()
+        if not stock_dict:
+            st.error("無法取得清單")
+        else:
+            placeholder_emoji = st.empty()
+            with placeholder_emoji:
+                st.markdown("""<div style="text-align: center; font-size: 40px; animation: blink 1s infinite;">🎁💰✨</div><style>@keyframes blink { 0% { opacity: 1; } 50% { opacity: 0.5; } 100% { opacity: 1; } }</style>""", unsafe_allow_html=True)
+            status_text = st.empty()
+            progress_bar = st.progress(0, text="準備下載...")
+            df = fetch_all_data(stock_dict, progress_bar, status_text)
+            placeholder_emoji.empty()
+            st.session_state['master_df'] = df
+            st.session_state['last_update'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            progress_bar.empty()
+            st.success(f"更新完成！共 {len(df)} 檔")
+
+    if st.session_state['last_update']:
+        st.caption(f"最後更新：{st.session_state['last_update']}")
+    
+    st.divider()
+    st.header("功能選擇")
+    bias_threshold = st.slider("乖離率範圍 (±%)", 0.5, 20.0, 5.0, step=0.1)
+    min_vol_input = st.number_input("最低成交量 (張)", value=1000, step=100)
+    
+    st.subheader("篩選濾網")
+    filter_trend_up = st.checkbox("📈 生命線向上 (多方)", value=False)
+    filter_treasure = st.checkbox("🔥 浴火重生 (假跌破)", value=False)
+    filter_crown = st.checkbox("👑 皇冠特選 (多頭排列)", value=False) # New
+    filter_obv = st.checkbox("🕵️ 潛伏雷達 (OBV吃貨)", value=False)
+    filter_vol_double = st.checkbox("出量 ( > 昨日x1.5)", value=False)
+    
+    st.divider()
+    st.subheader("策略實驗室")
+    if st.button("🏆 執行策略擂台 (含動態出場)"):
+        st.info("正在比較 7 種策略... (含動態停利停損機制)")
+        stock_dict = get_stock_list()
+        opt_progress = st.progress(0, text="初始化擂台...")
+        opt_df = run_optimization_tournament(stock_dict, opt_progress)
+        st.session_state['optimizer_result'] = opt_df
+        opt_progress.empty()
+        st.success("擂台賽結束！")
+
+    if st.button("🧪 單一策略回測"):
+        st.info("執行回測... ")
+        stock_dict = get_stock_list()
+        bt_progress = st.progress(0, text="初始化回測...")
+        bt_df = run_strategy_backtest(
+            stock_dict, bt_progress, 
+            use_trend_up=filter_trend_up, use_treasure=filter_treasure, 
+            use_vol=filter_vol_double, use_obv=filter_obv, use_crown=filter_crown
+        )
+        st.session_state['backtest_result'] = bt_df
+        bt_progress.empty()
+
+# --- 主畫面顯示 ---
+# 1. 策略擂台結果
+if st.session_state['optimizer_result'] is not None:
+    df_opt = st.session_state['optimizer_result']
+    st.subheader("🏆 策略擂台賽：哪種條件最會漲？")
+    st.caption("比較「持有20天」與「動態出場(+10%停利 / 破線停損)」之績效差異")
+    
+    if not df_opt.empty:
+        # 定義策略群組
+        strategies = {
+            "1. 裸測 (接近生命線)": df_opt[df_opt['Is_Basic_Near'] == True],
+            "2. 順勢 (生命線向上)": df_opt[(df_opt['Is_Basic_Near'] == True) & (df_opt['Tag_Trend_Up'] == True)],
+            "3. 爆量 (出量攻擊)": df_opt[(df_opt['Is_Basic_Near'] == True) & (df_opt['Tag_Vol_Double'] == True)],
+            "4. 浴火重生 (假跌破)": df_opt[df_opt['Tag_Treasure'] == True],
+            "5. 黃金組合 (順勢+爆量)": df_opt[(df_opt['Is_Basic_Near'] == True) & (df_opt['Tag_Trend_Up'] == True) & (df_opt['Tag_Vol_Double'] == True)],
+            "6. 潛伏雷達 (OBV吃貨)": df_opt[(df_opt['Is_Basic_Near'] == True) & (df_opt['Tag_OBV_In'] == True)],
+            "7. 👑 皇冠特選 (多頭排列+動態)": df_opt[df_opt['Tag_Crown'] == True],
+        }
+        
+        summary_list = []
+        for name, sub_df in strategies.items():
+            if len(sub_df) > 0:
+                # 判斷是否為動態策略 (策略7)
+                if "皇冠" in name:
+                    wins = len(sub_df[sub_df['Is_Win_Dynamic'] == True])
+                    avg_profit = sub_df['Profit_Dynamic'].mean()
+                    note = "動態出場"
+                else:
+                    wins = len(sub_df[sub_df['Is_Win_Static'] == True])
+                    avg_profit = sub_df['Profit_Static'].mean()
+                    note = "持有20天"
+                    
+                win_rate = (wins / len(sub_df)) * 100
+                summary_list.append({"策略名稱": name, "模式": note, "交易次數": len(sub_df), "勝率 (%)": win_rate, "平均報酬 (%)": avg_profit})
+            else:
+                summary_list.append({"策略名稱": name, "模式": "-", "交易次數": 0, "勝率 (%)": 0, "平均報酬 (%)": 0})
+        
+        sum_df = pd.DataFrame(summary_list).sort_values(by="勝率 (%)", ascending=False)
+        st.dataframe(sum_df.style.background_gradient(subset=['勝率 (%)', '平均報酬 (%)'], cmap='RdYlGn'), use_container_width=True)
+        st.markdown("---")
+
+# 2. 單一回測報告
+if st.session_state['backtest_result'] is not None:
+    bt_df = st.session_state['backtest_result']
+    st.subheader("🧪 回測詳情")
+    if len(bt_df) > 0:
+        win_count = len(bt_df[bt_df['報酬率(%)'] > 0])
+        total_count = len(bt_df)
+        win_rate = int((win_count / total_count) * 100)
+        avg_ret = round(bt_df['報酬率(%)'].mean(), 2)
+        
+        col1, col2, col3 = st.columns(3)
+        col1.metric("交易次數", total_count)
+        col2.metric("勝率", f"{win_rate}%")
+        col3.metric("平均報酬", f"{avg_ret}%")
+        
+        def color_ret(val): return f'color: {"red" if val > 0 else "green"}'
+        st.dataframe(bt_df.style.map(color_ret, subset=['報酬率(%)']), use_container_width=True)
+    else:
+        st.warning("無符合條件之交易")
+    st.markdown("---")
+
+# 3. 日常篩選
+if st.session_state['master_df'] is not None:
+    df = st.session_state['master_df'].copy()
+    df = df[df['abs_bias'] <= bias_threshold]
+    df = df[df['成交量'] >= (min_vol_input * 1000)]
+    
+    if filter_trend_up: df = df[df['生命線趨勢'] == "⬆️向上"]
+    if filter_treasure: df = df[df['浴火重生'] == True]
+    if filter_obv: df = df[df['OBV趨勢'] == "🔥吸籌"]
+    if filter_vol_double: df = df[df['成交量'] > (df['昨日成交量'] * 1.5)]
+    if filter_crown: df = df[df['皇冠型態'] == True] # New
+
+    if len(df) == 0:
+        st.warning(f"⚠️ 找不到符合條件的股票！(若勾選皇冠特選，條件較嚴格)")
+    else:
+        st.success(f"🔍 篩選出 {len(df)} 檔股票")
+        df['成交量(張)'] = (df['成交量'] / 1000).astype(int)
+        df['選股標籤'] = df['代號'] + " " + df['名稱']
+        
+        tab1, tab2 = st.tabs(["📋 列表", "📊 走勢"])
+        with tab1:
+            st.dataframe(df[['代號', '名稱', '收盤價', '生命線', '乖離率(%)', '成交量(張)', '皇冠型態', 'OBV趨勢']], use_container_width=True, hide_index=True)
+        with tab2:
+            if len(df) > 0:
+                sel = st.selectbox("選擇股票：", df['選股標籤'].tolist())
+                row = df[df['選股標籤'] == sel].iloc[0]
+                plot_stock_chart(row['完整代號'], row['名稱'])
+else:
+    col1, col2, col3 = st.columns([1, 2, 1])
+    with col2:
+        if os.path.exists("welcome.jpg"): st.image("welcome.jpg", width=180)
