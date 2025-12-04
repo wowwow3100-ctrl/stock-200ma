@@ -381,4 +381,11 @@ if st.session_state['mdf'] is not None:
             row = df[df['完整代號']==s.split()[0]].iloc[0]
             plot_chart(row['完整代號'], row['名稱'])
 else:
-    st.image("welcome.jpg") if os.path.exists("welcome.jpg") else None
+    st.image("welcome.jpg") if os.path.exists("welcome.jpg") else:
+    # 這裡改成標準寫法，就不會跳出亂碼了
+    if os.path.exists("welcome.jpg"):
+        st.image("welcome.jpg")
+    else:
+        # 如果沒有圖片，就只顯示歡迎語
+        pass
+
