@@ -563,3 +563,4 @@ else:
                  st.image("welcome.jpg", width=180)
         else:
             st.info("💡 尚未偵測到 welcome.jpg，請將您的紫色招財圖上傳至 GitHub 並命名為 welcome.jpg，這裡就會顯示囉！")
+
