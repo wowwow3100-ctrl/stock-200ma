@@ -9,7 +9,7 @@ import requests
 import os
 
 # --- 1. 網頁設定 ---
-VER = "ver3.11"
+VER = "ver3.12 (Fix)"
 st.set_page_config(page_title=f"🍍 旺來-台股生命線({VER})", layout="wide")
 
 # --- 2. 核心功能區 ---
@@ -51,12 +51,15 @@ def calculate_kd_values(df, n=9):
     except:
         return 50, 50
 
-# --- 策略回測核心函數 ---
+# --- 策略回測核心函數 (修正版: 包含關注中清單) ---
 def run_strategy_backtest(stock_dict, progress_bar, use_trend_up, use_treasure, use_vol):
     results = []
     all_tickers = list(stock_dict.keys())
     BATCH_SIZE = 50 
     total_batches = (len(all_tickers) // BATCH_SIZE) + 1
+    
+    # 設定觀察期 (例如策略是看未來 10 日最高價)
+    OBSERVE_DAYS = 10 
     
     for i, batch_idx in enumerate(range(0, len(all_tickers), BATCH_SIZE)):
         batch = all_tickers[batch_idx : batch_idx + BATCH_SIZE]
@@ -78,7 +81,10 @@ def run_strategy_backtest(stock_dict, progress_bar, use_trend_up, use_treasure, 
                     df_h = df_h.to_frame(name=batch[0])
 
                 ma200_df = df_c.rolling(window=200).mean()
-                scan_window = df_c.index[-90:-10] 
+                
+                # --- 修改點 1: 掃描範圍改成直到最新一天 ---
+                # 原本只到 -10，現在改成到最後一天，以便抓出"關注中"的股票
+                scan_window = df_c.index[-90:] 
                 
                 for ticker in df_c.columns:
                     try:
@@ -90,9 +96,15 @@ def run_strategy_backtest(stock_dict, progress_bar, use_trend_up, use_treasure, 
                         
                         stock_name = stock_dict.get(ticker, {}).get('name', ticker)
                         
+                        # 取得該股票最後有效交易日的索引長度
+                        total_len = len(c_series)
+
                         for date in scan_window:
-                            if pd.isna(ma_series[date]): continue
+                            if pd.isna(ma_series.get(date)): continue
                             
+                            # 確保日期存在於該個股的索引中
+                            if date not in c_series.index: continue
+
                             idx = c_series.index.get_loc(date)
                             if idx < 20: continue 
 
@@ -126,29 +138,49 @@ def run_strategy_backtest(stock_dict, progress_bar, use_trend_up, use_treasure, 
                                 if cond_near and cond_up: is_match = True
                             
                             if is_match:
-                                future_highs = h_series.iloc[idx+1 : idx+11]
-                                max_price = future_highs.max()
-                                max_profit_pct = (max_price - close_p) / close_p * 100
-                                
                                 month_str = date.strftime('%m月')
                                 
-                                # --- 修正名詞 ---
-                                if max_profit_pct > 3.0:
-                                    result_status = "驗證成功 🏆" # 改名
-                                elif max_profit_pct > 0:
-                                    result_status = "Win (反彈)"
-                                else:
-                                    result_status = "Loss 📉"
+                                # --- 修改點 2: 判斷是否為「關注中」 (未滿 10 天) ---
+                                days_after_signal = total_len - 1 - idx
                                 
-                                results.append({
-                                    '月份': month_str,
-                                    '代號': ticker.replace(".TW", "").replace(".TWO", ""),
-                                    '名稱': stock_name,
-                                    '訊號日期': date.strftime('%Y-%m-%d'),
-                                    '訊號價': round(close_p, 2),
-                                    '最高漲幅(%)': round(max_profit_pct, 2),
-                                    '結果': result_status
-                                })
+                                if days_after_signal < OBSERVE_DAYS:
+                                    # 時間不足 10 天，列為關注中
+                                    # 計算「目前」的漲幅供參考
+                                    current_price = c_series.iloc[-1]
+                                    current_profit = (current_price - close_p) / close_p * 100
+                                    
+                                    results.append({
+                                        '月份': '👀 關注中', # 特殊分類
+                                        '代號': ticker.replace(".TW", "").replace(".TWO", ""),
+                                        '名稱': stock_name,
+                                        '訊號日期': date.strftime('%Y-%m-%d'),
+                                        '訊號價': round(close_p, 2),
+                                        '最高漲幅(%)': round(current_profit, 2), # 這裡放的是"至今漲幅"
+                                        '結果': "觀察中"
+                                    })
+                                else:
+                                    # 時間足夠，進行歷史驗證
+                                    future_highs = h_series.iloc[idx+1 : idx+1+OBSERVE_DAYS]
+                                    if len(future_highs) > 0:
+                                        max_price = future_highs.max()
+                                        max_profit_pct = (max_price - close_p) / close_p * 100
+                                        
+                                        if max_profit_pct > 3.0:
+                                            result_status = "驗證成功 🏆"
+                                        elif max_profit_pct > 0:
+                                            result_status = "Win (反彈)"
+                                        else:
+                                            result_status = "Loss 📉"
+                                        
+                                        results.append({
+                                            '月份': month_str,
+                                            '代號': ticker.replace(".TW", "").replace(".TWO", ""),
+                                            '名稱': stock_name,
+                                            '訊號日期': date.strftime('%Y-%m-%d'),
+                                            '訊號價': round(close_p, 2),
+                                            '最高漲幅(%)': round(max_profit_pct, 2),
+                                            '結果': result_status
+                                        })
                                 break 
                     except:
                         continue
@@ -406,12 +438,12 @@ with st.sidebar:
 
     with st.expander("📅 系統開發日誌 (Changelog)"):
         st.markdown("""
+        ### Ver 3.12 (Fix)
+        * **Fix**: 修正回測邏輯，解決「近期股票因時間不足而被忽略」的問題。
+        * **New Feature**: 新增「👀 旺來關注中」區塊，專門顯示觸發訊號未滿 10 天的潛力股，與歷史勝率統計分開，數據更精準。
+
         ### Ver 3.11 (Simple Line Chart)
         * **Visual**: 圖表改版，捨棄 K 線，改用純粹的「收盤價 vs 生命線」雙線圖，趨勢一目了然。
-        * **Term**: 回測報告中的 Big Win 更名為「驗證成功」。
-
-        ### Ver 3.10 (Win Rate Logic)
-        * **Correction**: 修正勝率判定邏輯 (漲幅 > 0% 即為 Win)。
         """)
 
 # 主畫面 - 回測報告
@@ -423,31 +455,57 @@ if st.session_state['backtest_result'] is not None:
     if filter_treasure: strategy_name = "浴火重生(假跌破)"
     elif filter_trend_up: strategy_name = "趨勢向上 + 支撐"
     
-    st.subheader(f"🧪 策略回測報告：{strategy_name} (歷史訊號驗證)")
+    st.subheader(f"🧪 策略回測報告：{strategy_name}")
+
+    # --- 新增：將資料分為「歷史驗證」與「關注中」 ---
+    df_history = bt_df[bt_df['結果'] != "觀察中"].copy()
+    df_watching = bt_df[bt_df['結果'] == "觀察中"].copy()
     
-    if len(bt_df) > 0:
-        months = sorted(bt_df['月份'].unique())
+    # 1. 顯示「旺來關注中」 (最近觸發的訊號)
+    if not df_watching.empty:
+        st.markdown(f"""
+        <div style="background-color: #fff8dc; padding: 15px; border-radius: 10px; border: 2px solid #ffa500; margin-bottom: 20px;">
+            <h3 style="color: #d2691e; margin:0;">👀 旺來關注中 (近 10 日訊號)</h3>
+            <p style="color: #666; margin:5px 0 0 0;">這些股票最近才觸發訊號，尚未滿足 10 天驗證期。<b>「最高漲幅」代表觸發至今的表現。</b></p>
+        </div>
+        """, unsafe_allow_html=True)
+        
+        # 整理顯示欄位，讓關注中列表更清楚
+        df_watching = df_watching.sort_values(by='訊號日期', ascending=False)
+        st.dataframe(
+            df_watching[['代號', '名稱', '訊號日期', '訊號價', '最高漲幅(%)']].style.background_gradient(cmap='Reds', subset=['最高漲幅(%)']),
+            use_container_width=True,
+            hide_index=True
+        )
+    else:
+        st.info("👀 最近 10 天內沒有新的觸發訊號。")
+
+    st.markdown("---")
+    st.markdown("### 📜 歷史驗證數據 (已結算)")
+
+    # 2. 顯示歷史驗證數據 (原有邏輯)
+    if len(df_history) > 0:
+        months = sorted(df_history['月份'].unique())
         
         tabs = st.tabs(["📊 總覽"] + months)
         
         with tabs[0]:
-            # 包含 Big Win 和 Win
-            win_count = len(bt_df[bt_df['結果'].str.contains("Win")])
-            total_count = len(bt_df)
-            win_rate = int((win_count / total_count) * 100)
-            avg_max_ret = round(bt_df['最高漲幅(%)'].mean(), 2)
+            win_count = len(df_history[df_history['結果'].str.contains("Win") | df_history['結果'].str.contains("驗證成功")])
+            total_count = len(df_history)
+            win_rate = int((win_count / total_count) * 100) if total_count > 0 else 0
+            avg_max_ret = round(df_history['最高漲幅(%)'].mean(), 2)
             
             col1, col2, col3 = st.columns(3)
             col1.metric("總觸發次數", total_count)
             col2.metric("總反彈機率 (漲幅>0%)", f"{win_rate}%")
             col3.metric("總平均最高漲幅", f"{avg_max_ret}%")
-            st.dataframe(bt_df, use_container_width=True)
+            st.dataframe(df_history, use_container_width=True)
 
         for i, m in enumerate(months):
             with tabs[i+1]:
-                m_df = bt_df[bt_df['月份'] == m]
+                m_df = df_history[df_history['月份'] == m]
                 
-                m_win = len(m_df[m_df['結果'].str.contains("Win")])
+                m_win = len(m_df[m_df['結果'].str.contains("Win") | m_df['結果'].str.contains("驗證成功")])
                 m_total = len(m_df)
                 m_rate = int((m_win / m_total) * 100) if m_total > 0 else 0
                 m_avg = round(m_df['最高漲幅(%)'].mean(), 2) if m_total > 0 else 0
@@ -463,7 +521,7 @@ if st.session_state['backtest_result'] is not None:
                 st.dataframe(m_df.style.map(color_ret, subset=['最高漲幅(%)']), use_container_width=True)
 
     else:
-        st.warning("在此回測期間內，沒有股票符合您目前勾選的條件組合。")
+        st.warning("在此回測期間內，沒有歷史股票符合您目前勾選的條件組合。")
     st.markdown("---")
 
 # 主畫面 - 日常篩選
@@ -563,4 +621,3 @@ else:
                  st.image("welcome.jpg", width=180)
         else:
             st.info("💡 尚未偵測到 welcome.jpg，請將您的紫色招財圖上傳至 GitHub 並命名為 welcome.jpg，這裡就會顯示囉！")
-
