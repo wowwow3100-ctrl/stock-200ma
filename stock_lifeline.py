@@ -7,35 +7,32 @@ from datetime import datetime, timedelta
 import plotly.graph_objects as go
 import numpy as np
 import os
-import matplotlib.pyplot as plt # 確保表格顏色正常
 
 # --- 1. 網頁設定 ---
-VER = "ver5.0_CrownStrategy"
+VER = "ver5.0_Crown"
 st.set_page_config(page_title=f"🍍 旺來-台股生命線({VER})", layout="wide")
 
 # --- 2. 核心功能區 ---
 @st.cache_data(ttl=3600)
 def get_stock_list():
-    """取得台股清單 (排除金融/ETF)"""
     try:
         tse = twstock.twse
         otc = twstock.tpex
         stock_dict = {}
-        exclude_industries = ['金融保險業', '存託憑證']
+        exclude = ['金融保險業', '存託憑證']
         for code, info in tse.items():
-            if info.type == '股票' and info.group not in exclude_industries:
-                stock_dict[f"{code}.TW"] = {'name': info.name, 'code': code, 'group': info.group}
+            if info.type == '股票' and info.group not in exclude:
+                stock_dict[f"{code}.TW"] = {'name': info.name, 'code': code}
         for code, info in otc.items():
-            if info.type == '股票' and info.group not in exclude_industries:
-                stock_dict[f"{code}.TWO"] = {'name': info.name, 'code': code, 'group': info.group}
+            if info.type == '股票' and info.group not in exclude:
+                stock_dict[f"{code}.TWO"] = {'name': info.name, 'code': code}
         return stock_dict
-    except:
-        return {}
+    except: return {}
 
-def calculate_kd_values(df, n=9):
+def calculate_kd(df, n=9):
     try:
-        low_min = df['Low'].rolling(window=n).min()
-        high_max = df['High'].rolling(window=n).max()
+        low_min = df['Low'].rolling(n).min()
+        high_max = df['High'].rolling(n).max()
         rsv = (df['Close'] - low_min) / (high_max - low_min) * 100
         rsv = rsv.fillna(50)
         k, d = 50, 50
@@ -43,597 +40,345 @@ def calculate_kd_values(df, n=9):
             k = (2/3) * k + (1/3) * r
             d = (2/3) * d + (1/3) * k
         return k, d
-    except:
-        return 50, 50
+    except: return 50, 50
 
 def calculate_obv(df):
-    try:
-        obv = (np.sign(df['Close'].diff()) * df['Volume']).fillna(0).cumsum()
-        return obv
-    except:
-        return pd.Series(0, index=df.index)
+    return (np.sign(df['Close'].diff()) * df['Volume']).fillna(0).cumsum()
 
-# --- 策略最佳化擂台函數 (含動態出場邏輯) ---
-def run_optimization_tournament(stock_dict, progress_bar):
+# --- 策略擂台 (含動態出場) ---
+def run_optimization(stock_dict, progress_bar):
     raw_signals = [] 
     all_tickers = list(stock_dict.keys())
-    BATCH_SIZE = 50 
-    total_batches = (len(all_tickers) // BATCH_SIZE) + 1
+    BATCH = 50 
+    total_batches = (len(all_tickers) // BATCH) + 1
     
-    for i, batch_idx in enumerate(range(0, len(all_tickers), BATCH_SIZE)):
-        batch = all_tickers[batch_idx : batch_idx + BATCH_SIZE]
+    for i, batch_idx in enumerate(range(0, len(all_tickers), BATCH)):
+        batch = all_tickers[batch_idx : batch_idx + BATCH]
         try:
             data = yf.download(batch, period="2y", interval="1d", progress=False, auto_adjust=False)
             if isinstance(data.columns, pd.MultiIndex): pass 
-            
             if not data.empty:
                 try:
-                    df_c = data['Close']
-                    df_v = data['Volume']
-                    df_l = data['Low']
-                    df_h = data['High']
-                except KeyError: continue
+                    df_c, df_v = data['Close'], data['Volume']
+                    df_l, df_h = data['Low'], data['High']
+                except: continue
                 
                 if isinstance(df_c, pd.Series):
-                    ticker = batch[0]
-                    df_c = df_c.to_frame(name=ticker)
-                    df_v = df_v.to_frame(name=ticker)
-                    df_l = df_l.to_frame(name=ticker)
-                    df_h = df_h.to_frame(name=ticker)
+                    df_c = df_c.to_frame(name=batch[0])
+                    df_v = df_v.to_frame(name=batch[0])
+                    df_l, df_h = df_l.to_frame(name=batch[0]), df_h.to_frame(name=batch[0])
 
-                # 計算均線
-                ma20_df = df_c.rolling(window=20).mean()
-                ma60_df = df_c.rolling(window=60).mean()
-                ma200_df = df_c.rolling(window=200).mean()
+                ma20 = df_c.rolling(20).mean()
+                ma60 = df_c.rolling(60).mean()
+                ma200 = df_c.rolling(200).mean()
                 
-                # 計算全體 OBV
-                obv_df = pd.DataFrame(index=df_c.index, columns=df_c.columns)
-                for col in df_c.columns:
-                    obv_df[col] = calculate_obv(pd.DataFrame({'Close': df_c[col], 'Volume': df_v[col]}))
-
-                scan_window_idx = df_c.index[-250:-25] # 預留25天給動態出場
+                scan_idx = df_c.index[-250:-25]
                 
                 for ticker in df_c.columns:
                     try:
-                        c_series = df_c[ticker]
-                        v_series = df_v[ticker]
-                        l_series = df_l[ticker]
-                        h_series = df_h[ticker]
-                        ma200_series = ma200_df[ticker]
-                        ma20_series = ma20_df[ticker]
-                        ma60_series = ma60_df[ticker]
-                        obv_series = obv_df[ticker]
+                        c, v = df_c[ticker], df_v[ticker]
+                        l, h = df_l[ticker], df_h[ticker]
+                        m200, m20, m60 = ma200[ticker], ma20[ticker], ma60[ticker]
                         
-                        if c_series.isna().sum() > 100 or ma200_series.isna().all(): continue
+                        if c.isna().sum() > 100: continue
 
-                        for date in scan_window_idx:
-                            if pd.isna(ma200_series[date]): continue
-                            idx = c_series.index.get_loc(date)
+                        for date in scan_idx:
+                            if pd.isna(m200[date]): continue
+                            idx = c.index.get_loc(date)
                             if idx < 60: continue 
 
-                            close_p = float(c_series.iloc[idx])
-                            low_p = float(l_series.iloc[idx])
-                            vol = float(v_series.iloc[idx])
-                            prev_vol = float(v_series.iloc[idx-1])
-                            ma200_val = float(ma200_series.iloc[idx])
-                            ma20_val = float(ma20_series.iloc[idx])
-                            ma60_val = float(ma60_series.iloc[idx])
-                            ma200_20ago = float(ma200_series.iloc[idx-20])
+                            cp, lp = float(c.iloc[idx]), float(l.iloc[idx])
+                            vol, p_vol = float(v.iloc[idx]), float(v.iloc[idx-1])
+                            m200v, m20v, m60v = float(m200.iloc[idx]), float(m20.iloc[idx]), float(m60.iloc[idx])
                             
-                            if ma200_val == 0 or prev_vol == 0: continue
+                            if m200v == 0 or p_vol == 0: continue
 
-                            # --- 訊號判斷 ---
-                            cond_near = (low_p <= ma200_val * 1.03) and (low_p >= ma200_val * 0.90)
-                            cond_up = (close_p > ma200_val)
-                            is_basic_signal = cond_near and cond_up # 基礎訊號
+                            # 訊號
+                            cond_near = (lp <= m200v * 1.03) and (lp >= m200v * 0.90)
+                            cond_up = (cp > m200v)
+                            basic = cond_near and cond_up
                             
-                            tag_trend_up = (ma200_val > ma200_20ago)
-                            tag_vol_double = (vol > prev_vol * 1.5)
+                            trend_up = (m200v > float(m200.iloc[idx-20]))
+                            vol_dbl = (vol > p_vol * 1.5)
                             
-                            obv_now = obv_series.iloc[idx]
-                            obv_week_ago = obv_series.iloc[idx-5]
-                            tag_obv_in = obv_now > obv_week_ago
-
-                            # 皇冠特選：多頭排列 (價格 > 20 > 60 > 200)
-                            tag_crown = (close_p > ma20_val) and (ma20_val > ma60_val) and (ma60_val > ma200_val) and tag_trend_up
+                            # 皇冠: 多頭排列
+                            crown = (cp > m20v) and (m20v > m60v) and (m60v > m200v) and trend_up
 
                             # 浴火重生
-                            tag_treasure = False
-                            start_idx = idx - 7
-                            if start_idx >= 0:
-                                recent_c = c_series.iloc[start_idx : idx+1]
-                                recent_ma = ma200_series.iloc[start_idx : idx+1]
-                                cond_today_up = recent_c.iloc[-1] > recent_ma.iloc[-1]
-                                cond_past_down = (recent_c.iloc[:-1] < recent_ma.iloc[:-1]).any()
-                                if cond_today_up and cond_past_down:
-                                    tag_treasure = True
+                            treasure = False
+                            if idx >= 7:
+                                rc, rm = c.iloc[idx-7:idx+1], m200.iloc[idx-7:idx+1]
+                                if rc.iloc[-1] > rm.iloc[-1] and (rc.iloc[:-1] < rm.iloc[:-1]).any():
+                                    treasure = True
 
-                            if not is_basic_signal and not tag_treasure and not tag_crown:
-                                continue
+                            if not basic and not treasure and not crown: continue
                                 
-                            # --- 績效計算 (分為 一般持有20天 vs 動態出場) ---
-                            if idx + 20 < len(c_series):
-                                # 1. 傳統：持有20天
-                                exit_price_static = float(c_series.iloc[idx + 20])
-                                profit_static = (exit_price_static - close_p) / close_p * 100
-                                is_win_static = profit_static > 0
+                            # 績效
+                            if idx + 20 < len(c):
+                                # 靜態
+                                ret_s = (float(c.iloc[idx+20]) - cp) / cp * 100
+                                win_s = ret_s > 0
 
-                                # 2. 動態：停利(+10%) 或 停損(跌破MA200)
-                                exit_price_dynamic = float(c_series.iloc[idx + 20]) # 預設
-                                status_dynamic = "Hold"
-                                
-                                # 逐日掃描未來 20 天
-                                for future_i in range(1, 21):
-                                    f_idx = idx + future_i
-                                    if f_idx >= len(c_series): break
-                                    
-                                    f_high = float(h_series.iloc[f_idx])
-                                    f_close = float(c_series.iloc[f_idx])
-                                    f_ma200 = float(ma200_series.iloc[f_idx])
-                                    
-                                    # 停利：最高價碰到 +10%
-                                    if f_high >= close_p * 1.10:
-                                        exit_price_dynamic = close_p * 1.10
-                                        status_dynamic = "TakeProfit"
+                                # 動態
+                                exit_d = float(c.iloc[idx+20])
+                                for fi in range(1, 21):
+                                    fidx = idx + fi
+                                    if fidx >= len(c): break
+                                    if float(h.iloc[fidx]) >= cp * 1.10: # 停利
+                                        exit_d = cp * 1.10
                                         break
-                                    
-                                    # 停損：收盤跌破 MA200 (容忍度 99%)
-                                    if f_close < f_ma200 * 0.99:
-                                        exit_price_dynamic = f_close
-                                        status_dynamic = "StopLoss"
+                                    if float(c.iloc[fidx]) < float(m200.iloc[fidx]) * 0.99: # 停損
+                                        exit_d = float(c.iloc[fidx])
                                         break
+                                ret_d = (exit_d - cp) / cp * 100
+                                win_d = ret_d > 0
                                 
-                                profit_dynamic = (exit_price_dynamic - close_p) / close_p * 100
-                                is_win_dynamic = profit_dynamic > 0
-                                
-                            else:
-                                continue 
-
-                            raw_signals.append({
-                                'Profit_Static': profit_static,
-                                'Is_Win_Static': is_win_static,
-                                'Profit_Dynamic': profit_dynamic,
-                                'Is_Win_Dynamic': is_win_dynamic,
-                                'Tag_Trend_Up': tag_trend_up,
-                                'Tag_Vol_Double': tag_vol_double,
-                                'Tag_Treasure': tag_treasure,
-                                'Tag_OBV_In': tag_obv_in,
-                                'Tag_Crown': tag_crown,
-                                'Is_Basic_Near': is_basic_signal
-                            })
-
-                    except Exception: continue
+                                raw_signals.append({
+                                    'P_Static': ret_s, 'W_Static': win_s,
+                                    'P_Dynamic': ret_d, 'W_Dynamic': win_d,
+                                    'Trend': trend_up, 'Vol': vol_dbl, 'Treasure': treasure,
+                                    'Crown': crown, 'Basic': basic
+                                })
+                    except: continue
         except: pass
-        progress = (i + 1) / total_batches
-        progress_bar.progress(progress, text=f"全策略掃描中...({int(progress*100)}%)")
+        progress_bar.progress((i+1)/total_batches, text="策略掃描中...")
         
     return pd.DataFrame(raw_signals)
 
-# --- 單一回測函數 (支援皇冠策略) ---
-def run_strategy_backtest(stock_dict, progress_bar, use_trend_up, use_treasure, use_vol, use_obv, use_crown):
+# --- 單一回測 ---
+def run_backtest(stock_dict, pbar, trend, treasure, vol, crown):
     results = []
-    all_tickers = list(stock_dict.keys())
-    BATCH_SIZE = 50 
-    total_batches = (len(all_tickers) // BATCH_SIZE) + 1
-    
-    for i, batch_idx in enumerate(range(0, len(all_tickers), BATCH_SIZE)):
-        batch = all_tickers[batch_idx : batch_idx + BATCH_SIZE]
+    tickers = list(stock_dict.keys())
+    BATCH = 50
+    for i, b_idx in enumerate(range(0, len(tickers), BATCH)):
+        batch = tickers[b_idx:b_idx+BATCH]
         try:
             data = yf.download(batch, period="2y", interval="1d", progress=False, auto_adjust=False)
             if isinstance(data.columns, pd.MultiIndex): pass
             if not data.empty:
                 try:
-                    df_c = data['Close']
-                    df_v = data['Volume']
-                    df_l = data['Low']
-                    df_h = data['High']
-                except KeyError: continue
-                
-                if isinstance(df_c, pd.Series):
+                    df_c, df_v = data['Close'], data['Volume']
+                    df_l, df_h = data['Low'], data['High']
+                except: continue
+                if isinstance(df_c, pd.Series): 
                     df_c = df_c.to_frame(name=batch[0])
-                    df_v = df_v.to_frame(name=batch[0])
-                    df_l = df_l.to_frame(name=batch[0])
-                    df_h = df_h.to_frame(name=batch[0])
-
-                ma20_df = df_c.rolling(window=20).mean()
-                ma60_df = df_c.rolling(window=60).mean()
-                ma200_df = df_c.rolling(window=200).mean()
+                    df_v, df_l, df_h = df_v.to_frame(name=batch[0]), df_l.to_frame(name=batch[0]), df_h.to_frame(name=batch[0])
                 
-                obv_df = pd.DataFrame(index=df_c.index, columns=df_c.columns)
-                for col in df_c.columns:
-                    obv_df[col] = calculate_obv(pd.DataFrame({'Close': df_c[col], 'Volume': df_v[col]}))
+                ma20, ma60, ma200 = df_c.rolling(20).mean(), df_c.rolling(60).mean(), df_c.rolling(200).mean()
+                scan = df_c.index[-250:-25]
 
-                scan_window = df_c.index[-250:-25] 
-                
-                for ticker in df_c.columns:
+                for tk in df_c.columns:
                     try:
-                        c_series = df_c[ticker]
-                        v_series = df_v[ticker]
-                        l_series = df_l[ticker]
-                        h_series = df_h[ticker]
-                        ma200_series = ma200_df[ticker]
-                        ma20_series = ma20_df[ticker]
-                        ma60_series = ma60_df[ticker]
-                        obv_series = obv_df[ticker]
+                        c, v, l, h = df_c[tk], df_v[tk], df_l[tk], df_h[tk]
+                        m200, m20, m60 = ma200[tk], ma20[tk], ma60[tk]
+                        name = stock_dict.get(tk, {}).get('name', tk)
                         
-                        stock_name = stock_dict.get(ticker, {}).get('name', ticker)
-                        stock_code = stock_dict.get(ticker, {}).get('code', ticker.split('.')[0])
-                        
-                        for date in scan_window:
-                            if pd.isna(ma200_series[date]): continue
-                            idx = c_series.index.get_loc(date)
-                            if idx < 60: continue 
-
-                            close_p = float(c_series.iloc[idx])
-                            low_p = float(l_series.iloc[idx])
-                            vol = float(v_series.iloc[idx])
-                            prev_vol = float(v_series.iloc[idx-1])
-                            ma200_val = float(ma200_series.iloc[idx])
+                        for date in scan:
+                            if pd.isna(m200[date]): continue
+                            idx = c.index.get_loc(date)
+                            if idx < 60: continue
                             
-                            # OBV Check
-                            obv_now = obv_series.iloc[idx]
-                            obv_week_ago = obv_series.iloc[idx-5]
-                            is_obv_up = obv_now > obv_week_ago
+                            cp, lp, vol_val = float(c.iloc[idx]), float(l.iloc[idx]), float(v.iloc[idx])
+                            m200v = float(m200.iloc[idx])
+                            if m200v==0: continue
 
-                            if ma200_val == 0 or prev_vol == 0: continue
-                            is_match = False
-                            
-                            # 條件判斷
-                            if use_crown:
-                                # 皇冠策略：多頭排列 + 趨勢向上
-                                ma20 = float(ma20_series.iloc[idx])
-                                ma60 = float(ma60_series.iloc[idx])
-                                ma200_20ago = float(ma200_series.iloc[idx-20])
-                                is_trend_up = ma200_val > ma200_20ago
-                                is_perfect_order = (close_p > ma20) and (ma20 > ma60) and (ma60 > ma200_val)
-                                if is_trend_up and is_perfect_order:
-                                    is_match = True
+                            match = False
+                            if crown:
+                                is_trend = m200v > float(m200.iloc[idx-20])
+                                is_order = (cp > float(m20.iloc[idx])) and (float(m20.iloc[idx]) > float(m60.iloc[idx])) and (float(m60.iloc[idx]) > m200v)
+                                if is_trend and is_order: match = True
                             else:
-                                # 一般策略
-                                if use_trend_up and (ma200_val <= float(ma200_series.iloc[idx-20])): continue
-                                if use_vol and (vol <= prev_vol * 1.5): continue
-                                if use_obv and not is_obv_up: continue
-
-                                if use_treasure:
-                                    start_idx = idx - 7
-                                    recent_c = c_series.iloc[start_idx : idx+1]
-                                    recent_ma = ma200_series.iloc[start_idx : idx+1]
-                                    cond_today_up = recent_c.iloc[-1] > recent_ma.iloc[-1]
-                                    past_c = recent_c.iloc[:-1]
-                                    past_ma = recent_ma.iloc[:-1]
-                                    cond_past_down = (past_c < past_ma).any()
-                                    if cond_today_up and cond_past_down: is_match = True
+                                if trend and m200v <= float(m200.iloc[idx-20]): continue
+                                if vol and vol_val <= float(v.iloc[idx-1])*1.5: continue
+                                if treasure:
+                                    if idx>=7:
+                                        rc, rm = c.iloc[idx-7:idx+1], m200.iloc[idx-7:idx+1]
+                                        if rc.iloc[-1]>rm.iloc[-1] and (rc.iloc[:-1]<rm.iloc[:-1]).any(): match = True
                                 else:
-                                    cond_near = (low_p <= ma200_val * 1.03) and (low_p >= ma200_val * 0.90) 
-                                    cond_up = (close_p > ma200_val)
-                                    if cond_near and cond_up: is_match = True
+                                    if lp <= m200v*1.03 and lp >= m200v*0.90 and cp > m200v: match = True
                             
-                            if is_match:
-                                # 動態出場回測
-                                if idx + 20 < len(c_series):
-                                    exit_price = float(c_series.iloc[idx + 20])
-                                    status = "持有20天"
-                                    
-                                    # 如果是皇冠策略，強制使用動態出場
-                                    if use_crown:
-                                        for future_i in range(1, 21):
-                                            f_idx = idx + future_i
-                                            if f_idx >= len(c_series): break
-                                            f_h = float(h_series.iloc[f_idx])
-                                            f_c = float(c_series.iloc[f_idx])
-                                            f_ma = float(ma200_series.iloc[f_idx])
-                                            
-                                            if f_h >= close_p * 1.10:
-                                                exit_price = close_p * 1.10
-                                                status = "🎯 停利 (+10%)"
-                                                break
-                                            if f_c < f_ma * 0.99:
-                                                exit_price = f_c
-                                                status = "🛡️ 停損 (破線)"
-                                                break
-                                    
-                                    profit_pct = (exit_price - close_p) / close_p * 100
-                                    results.append({
-                                        'StockID': stock_code,
-                                        '名稱': stock_name,
-                                        'Date': date,
-                                        '訊號日期': date.strftime('%Y-%m-%d'),
-                                        '訊號價': round(float(close_p), 2),
-                                        '出場價': round(float(exit_price), 2),
-                                        '報酬率(%)': round(float(profit_pct), 2),
-                                        '結果': status
-                                    })
-                    except Exception: continue
+                            if match and idx+20 < len(c):
+                                ep, status = float(c.iloc[idx+20]), "持有20天"
+                                if crown:
+                                    for fi in range(1, 21):
+                                        fidx = idx+fi
+                                        if fidx>=len(c): break
+                                        if float(h.iloc[fidx]) >= cp*1.1:
+                                            ep, status = cp*1.1, "🎯停利"
+                                            break
+                                        if float(c.iloc[fidx]) < float(m200.iloc[fidx])*0.99:
+                                            ep, status = float(c.iloc[fidx]), "🛡️停損"
+                                            break
+                                ret = (ep - cp)/cp*100
+                                results.append({'Date': date, 'Code': tk, 'Name': name, 'Price': cp, 'Ret': ret, 'Result': status})
+                    except: continue
         except: pass
-        progress = (i + 1) / total_batches
-        progress_bar.progress(progress, text=f"深度回測中...({int(progress*100)}%)")
-        
-    return pd.DataFrame(results) if results else pd.DataFrame()
-    # --- 即時資料抓取 ---
-def fetch_all_data(stock_dict, progress_bar, status_text):
-    if not stock_dict: return pd.DataFrame()
-    all_tickers = list(stock_dict.keys())
-    BATCH_SIZE = 30
-    total_batches = (len(all_tickers) // BATCH_SIZE) + 1
-    raw_data_list = []
+        pbar.progress((i+1)/((len(tickers)//BATCH)+1), text="回測中...")
+    return pd.DataFrame(results)
 
-    for i, batch_idx in enumerate(range(0, len(all_tickers), BATCH_SIZE)):
-        batch = all_tickers[batch_idx : batch_idx + BATCH_SIZE]
+# --- 即時資料 ---
+def fetch_data(stock_dict, pbar):
+    if not stock_dict: return pd.DataFrame()
+    tickers = list(stock_dict.keys())
+    BATCH = 30
+    res = []
+    for i, b_idx in enumerate(range(0, len(tickers), BATCH)):
+        batch = tickers[b_idx:b_idx+BATCH]
         try:
             data = yf.download(batch, period="1y", interval="1d", progress=False, auto_adjust=False)
             if isinstance(data.columns, pd.MultiIndex): pass
-            
             if not data.empty:
-                try:
-                    df_c = data['Close']
-                    df_h = data['High']
-                    df_l = data['Low']
-                    df_v = data['Volume']
-                except KeyError: continue
-
-                if isinstance(df_c, pd.Series):
+                try: df_c, df_h, df_l, df_v = data['Close'], data['High'], data['Low'], data['Volume']
+                except: continue
+                if isinstance(df_c, pd.Series): 
                     df_c = df_c.to_frame(name=batch[0])
-                    df_h = df_h.to_frame(name=batch[0])
-                    df_l = df_l.to_frame(name=batch[0])
-                    df_v = df_v.to_frame(name=batch[0])
+                    df_h, df_l, df_v = df_h.to_frame(name=batch[0]), df_l.to_frame(name=batch[0]), df_v.to_frame(name=batch[0])
 
-                ma20_df = df_c.rolling(window=20).mean()
-                ma60_df = df_c.rolling(window=60).mean()
-                ma200_df = df_c.rolling(window=200).mean()
-                obv_df = pd.DataFrame(index=df_c.index, columns=df_c.columns)
-                for col in df_c.columns:
-                    obv_df[col] = calculate_obv(pd.DataFrame({'Close': df_c[col], 'Volume': df_v[col]}))
+                m200, m20, m60 = df_c.rolling(200).mean(), df_c.rolling(20).mean(), df_c.rolling(60).mean()
                 
-                last_idx = -1
-                
-                for ticker in df_c.columns:
+                for tk in df_c.columns:
                     try:
-                        price = float(df_c[ticker].iloc[last_idx])
-                        ma200 = float(ma200_df[ticker].iloc[last_idx])
-                        ma20 = float(ma20_df[ticker].iloc[last_idx])
-                        ma60 = float(ma60_df[ticker].iloc[last_idx])
-                        vol = float(df_v[ticker].iloc[last_idx])
-                        prev_vol = float(df_v[ticker].iloc[last_idx-1])
+                        p = float(df_c[tk].iloc[-1])
+                        m200v = float(m200[tk].iloc[-1])
+                        if pd.isna(p) or m200v==0: continue
                         
-                        obv_now = obv_df[ticker].iloc[last_idx]
-                        obv_prev = obv_df[ticker].iloc[last_idx-6]
-                        is_obv_in = obv_now > obv_prev
+                        m20v, m60v = float(m20[tk].iloc[-1]), float(m60[tk].iloc[-1])
                         
-                        if pd.isna(price) or pd.isna(ma200) or ma200 == 0: continue
-
-                        ma_trend = "⬆️向上" if ma200 >= ma200_df[ticker].iloc[last_idx-20] else "⬇️向下"
+                        crown = (p > m20v) and (m20v > m60v) and (m60v > m200v) and (m200v > float(m200[tk].iloc[-21]))
+                        treasure = False
+                        rc, rm = df_c[tk].iloc[-8:], m200[tk].iloc[-8:]
+                        if len(rc)>=8 and rc.iloc[-1]>rm.iloc[-1] and (rc.iloc[:-1]<rm.iloc[:-1]).any(): treasure = True
                         
-                        is_crown = (price > ma20) and (ma20 > ma60) and (ma60 > ma200) and (ma200 > ma200_df[ticker].iloc[last_idx-20])
-
-                        is_treasure = False
-                        recent_c = df_c[ticker].iloc[-8:]
-                        recent_ma = ma200_df[ticker].iloc[-8:]
-                        if len(recent_c) >= 8:
-                            cond_today_up = float(recent_c.iloc[-1]) > float(recent_ma.iloc[-1])
-                            cond_past_down = (recent_c.iloc[:-1] < recent_ma.iloc[:-1]).any()
-                            if cond_today_up and cond_past_down: is_treasure = True
-
-                        stock_df = pd.DataFrame({'Close': df_c[ticker], 'High': df_h[ticker], 'Low': df_l[ticker]}).dropna()
-                        k_val, d_val = 0, 0
-                        if len(stock_df) >= 9:
-                            k_val, d_val = calculate_kd_values(stock_df)
-
-                        bias = ((price - ma200) / ma200) * 100
-                        stock_info = stock_dict.get(ticker)
-                        if not stock_info: continue
-
-                        raw_data_list.append({
-                            '代號': stock_info['code'],
-                            '名稱': stock_info['name'],
-                            '完整代號': ticker,
-                            '收盤價': round(price, 2),
-                            '生命線': round(ma200, 2),
-                            '生命線趨勢': ma_trend,
-                            '乖離率(%)': round(bias, 2),
-                            'abs_bias': abs(bias),
-                            '成交量': int(vol),
-                            '昨日成交量': int(prev_vol),
-                            'K值': round(float(k_val), 2),
-                            'D值': round(float(d_val), 2),
-                            '位置': "🟢生命線上" if price >= ma200 else "🔴生命線下",
-                            '浴火重生': is_treasure,
-                            'OBV趨勢': "🔥吸籌" if is_obv_in else "☁️一般",
-                            '皇冠型態': is_crown
+                        sdf = pd.DataFrame({'Close':df_c[tk], 'High':df_h[tk], 'Low':df_l[tk]}).dropna()
+                        k, d = calculate_kd(sdf) if len(sdf)>=9 else (0,0)
+                        
+                        bias = (p - m200v)/m200v * 100
+                        info = stock_dict.get(tk, {})
+                        
+                        res.append({
+                            '代號': info.get('code',''), '名稱': info.get('name',''), '完整代號': tk,
+                            '收盤': round(p,2), '生命線': round(m200v,2), '乖離': round(bias,2), 'abs_bias': abs(bias),
+                            '量': int(df_v[tk].iloc[-1]), '昨量': int(df_v[tk].iloc[-2]),
+                            '位置': "線上" if p>=m200v else "線下",
+                            '浴火': treasure, '皇冠': crown, 'KD': f"K{int(k)}D{int(d)}"
                         })
-                    except Exception: continue
+                    except: continue
         except: pass
-        current_progress = (i + 1) / total_batches
-        progress_bar.progress(current_progress, text=f"挖掘寶藏中...({int(current_progress*100)}%)")
+        pbar.progress((i+1)/((len(tickers)//BATCH)+1), text="更新中...")
         time.sleep(0.02)
-    return pd.DataFrame(raw_data_list)
+    return pd.DataFrame(res)
 
-def plot_stock_chart(ticker, name):
+def plot_chart(ticker, name):
     try:
         df = yf.download(ticker, period="1y", interval="1d", progress=False, auto_adjust=False)
         if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
-        if df.index.tz is not None: df.index = df.index.tz_localize(None)
         df = df.dropna()
         if df.empty: return
-        df['200MA'] = df['Close'].rolling(window=200).mean()
-        df['60MA'] = df['Close'].rolling(window=60).mean()
-        df['20MA'] = df['Close'].rolling(window=20).mean()
-        plot_df = df.tail(120).copy()
-        plot_df['DateStr'] = plot_df.index.strftime('%Y-%m-%d')
-
+        df['MA200'], df['MA60'], df['MA20'] = df['Close'].rolling(200).mean(), df['Close'].rolling(60).mean(), df['Close'].rolling(20).mean()
+        pdf = df.tail(120).copy()
+        pdf['Date'] = pdf.index.strftime('%Y-%m-%d')
         fig = go.Figure()
-        fig.add_trace(go.Scatter(x=plot_df['DateStr'], y=plot_df['Close'], mode='lines', name='收盤價', line=dict(color='#00CC96', width=2.5)))
-        fig.add_trace(go.Scatter(x=plot_df['DateStr'], y=plot_df['20MA'], mode='lines', name='月線(20MA)', line=dict(color='#AB63FA', width=1)))
-        fig.add_trace(go.Scatter(x=plot_df['DateStr'], y=plot_df['60MA'], mode='lines', name='季線(60MA)', line=dict(color='#19D3F3', width=1)))
-        fig.add_trace(go.Scatter(x=plot_df['DateStr'], y=plot_df['200MA'], mode='lines', name='生命線(200MA)', line=dict(color='#FFA15A', width=3)))
-        
-        fig.update_layout(title=f"📊 {name} ({ticker})", yaxis_title='價格', height=500, hovermode="x unified", legend=dict(orientation="h", y=1.02))
+        fig.add_trace(go.Scatter(x=pdf['Date'], y=pdf['Close'], name='收盤', line=dict(color='#00CC96')))
+        fig.add_trace(go.Scatter(x=pdf['Date'], y=pdf['MA20'], name='月線', line=dict(color='#AB63FA', width=1)))
+        fig.add_trace(go.Scatter(x=pdf['Date'], y=pdf['MA60'], name='季線', line=dict(color='#19D3F3', width=1)))
+        fig.add_trace(go.Scatter(x=pdf['Date'], y=pdf['MA200'], name='生命線', line=dict(color='#FFA15A', width=3)))
+        fig.update_layout(title=f"{name} ({ticker})", height=450, hovermode="x unified")
         st.plotly_chart(fig, use_container_width=True)
     except: st.error("繪圖失敗")
 
-# --- 3. 介面顯示區 ---
+# --- 3. 介面 ---
 st.title(f"🍍 {VER} 旺來-台股生命線")
 st.markdown("---")
 
-if 'master_df' not in st.session_state: st.session_state['master_df'] = None
-if 'last_update' not in st.session_state: st.session_state['last_update'] = None
-if 'backtest_result' not in st.session_state: st.session_state['backtest_result'] = None
-if 'optimizer_result' not in st.session_state: st.session_state['optimizer_result'] = None
+if 'mdf' not in st.session_state: st.session_state['mdf'] = None
+if 'opt' not in st.session_state: st.session_state['opt'] = None
+if 'bt' not in st.session_state: st.session_state['bt'] = None
 
 with st.sidebar:
-    st.header("資料庫管理")
-    if st.button("🚨 強制重置系統"):
-        st.cache_data.clear()
-        st.session_state.clear()
-        st.rerun()
-
-    # --- 調整：招呼語移到更新按鈕前 ---
-    st.info("💡 歡迎使用旺來-台股生命線系統！")
+    st.header("設定")
+    if st.button("🚨 重置"): st.cache_data.clear(); st.session_state.clear(); st.rerun()
     
-    if st.button("🔄 更新股價資料 (開市請按我)", type="primary"):
-        stock_dict = get_stock_list()
-        if not stock_dict:
-            st.error("無法取得清單")
-        else:
-            placeholder_emoji = st.empty()
-            with placeholder_emoji:
-                st.markdown("""<div style="text-align: center; font-size: 40px; animation: blink 1s infinite;">🎁💰✨</div><style>@keyframes blink { 0% { opacity: 1; } 50% { opacity: 0.5; } 100% { opacity: 1; } }</style>""", unsafe_allow_html=True)
-            status_text = st.empty()
-            progress_bar = st.progress(0, text="準備下載...")
-            df = fetch_all_data(stock_dict, progress_bar, status_text)
-            placeholder_emoji.empty()
-            st.session_state['master_df'] = df
-            st.session_state['last_update'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            progress_bar.empty()
-            st.success(f"更新完成！共 {len(df)} 檔")
-
-    if st.session_state['last_update']:
-        st.caption(f"最後更新：{st.session_state['last_update']}")
+    # 招呼語在這裡
+    st.info("💡 歡迎使用！祝您操作順利，天天漲停！")
+    
+    if st.button("🔄 更新股價", type="primary"):
+        sdict = get_stock_list()
+        if sdict:
+            pb = st.progress(0, "下載中...")
+            st.session_state['mdf'] = fetch_data(sdict, pb)
+            pb.empty()
+            st.success("完成")
     
     st.divider()
-    st.header("功能選擇")
-    bias_threshold = st.slider("乖離率範圍 (±%)", 0.5, 20.0, 5.0, step=0.1)
-    min_vol_input = st.number_input("最低成交量 (張)", value=1000, step=100)
+    bias = st.slider("乖離率", 0.5, 20.0, 5.0)
+    vol_min = st.number_input("最小量", 1000, step=100)
     
-    st.subheader("篩選濾網")
-    filter_trend_up = st.checkbox("📈 生命線向上 (多方)", value=False)
-    filter_treasure = st.checkbox("🔥 浴火重生 (假跌破)", value=False)
-    filter_crown = st.checkbox("👑 皇冠特選 (多頭排列)", value=False) # New
-    filter_obv = st.checkbox("🕵️ 潛伏雷達 (OBV吃貨)", value=False)
-    filter_vol_double = st.checkbox("出量 ( > 昨日x1.5)", value=False)
+    st.subheader("篩選")
+    f_up = st.checkbox("📈 生命線向上")
+    f_tr = st.checkbox("🔥 浴火重生")
+    f_cr = st.checkbox("👑 皇冠特選 (多頭+動態)")
+    f_vo = st.checkbox("出量 (>1.5倍)")
     
     st.divider()
-    st.subheader("策略實驗室")
-    if st.button("🏆 執行策略擂台 (含動態出場)"):
-        st.info("正在比較 7 種策略... (含動態停利停損機制)")
-        stock_dict = get_stock_list()
-        opt_progress = st.progress(0, text="初始化擂台...")
-        opt_df = run_optimization_tournament(stock_dict, opt_progress)
-        st.session_state['optimizer_result'] = opt_df
-        opt_progress.empty()
-        st.success("擂台賽結束！")
-
-    if st.button("🧪 單一策略回測"):
-        st.info("執行回測... ")
-        stock_dict = get_stock_list()
-        bt_progress = st.progress(0, text="初始化回測...")
-        bt_df = run_strategy_backtest(
-            stock_dict, bt_progress, 
-            use_trend_up=filter_trend_up, use_treasure=filter_treasure, 
-            use_vol=filter_vol_double, use_obv=filter_obv, use_crown=filter_crown
-        )
-        st.session_state['backtest_result'] = bt_df
-        bt_progress.empty()
-
-# --- 主畫面顯示 ---
-# 1. 策略擂台結果
-if st.session_state['optimizer_result'] is not None:
-    df_opt = st.session_state['optimizer_result']
-    st.subheader("🏆 策略擂台賽：哪種條件最會漲？")
-    st.caption("比較「持有20天」與「動態出場(+10%停利 / 破線停損)」之績效差異")
+    if st.button("🏆 策略擂台"):
+        sdict = get_stock_list()
+        pb = st.progress(0)
+        st.session_state['opt'] = run_optimization(sdict, pb)
+        pb.empty()
     
-    if not df_opt.empty:
-        # 定義策略群組
-        strategies = {
-            "1. 裸測 (接近生命線)": df_opt[df_opt['Is_Basic_Near'] == True],
-            "2. 順勢 (生命線向上)": df_opt[(df_opt['Is_Basic_Near'] == True) & (df_opt['Tag_Trend_Up'] == True)],
-            "3. 爆量 (出量攻擊)": df_opt[(df_opt['Is_Basic_Near'] == True) & (df_opt['Tag_Vol_Double'] == True)],
-            "4. 浴火重生 (假跌破)": df_opt[df_opt['Tag_Treasure'] == True],
-            "5. 黃金組合 (順勢+爆量)": df_opt[(df_opt['Is_Basic_Near'] == True) & (df_opt['Tag_Trend_Up'] == True) & (df_opt['Tag_Vol_Double'] == True)],
-            "6. 潛伏雷達 (OBV吃貨)": df_opt[(df_opt['Is_Basic_Near'] == True) & (df_opt['Tag_OBV_In'] == True)],
-            "7. 👑 皇冠特選 (多頭排列+動態)": df_opt[df_opt['Tag_Crown'] == True],
+    if st.button("🧪 單一回測"):
+        sdict = get_stock_list()
+        pb = st.progress(0)
+        st.session_state['bt'] = run_backtest(sdict, pb, f_up, f_tr, f_vo, f_cr)
+        pb.empty()
+
+# 顯示區
+if st.session_state['opt'] is not None:
+    df = st.session_state['opt']
+    st.subheader("🏆 擂台結果 (持有20天 vs 動態出場)")
+    if not df.empty:
+        s_list = []
+        strats = {
+            "1. 裸測": df[df['Basic']],
+            "2. 順勢": df[df['Basic'] & df['Trend']],
+            "3. 爆量": df[df['Basic'] & df['Vol']],
+            "4. 浴火": df[df['Treasure']],
+            "7. 👑 皇冠(動態)": df[df['Crown']]
         }
+        for n, d in strats.items():
+            if len(d)>0:
+                is_dyn = "皇冠" in n
+                w = len(d[d['W_Dynamic']]) if is_dyn else len(d[d['W_Static']])
+                p = d['P_Dynamic'].mean() if is_dyn else d['P_Static'].mean()
+                s_list.append({'策略':n, '次數':len(d), '勝率%': (w/len(d))*100, '報酬%': p})
         
-        summary_list = []
-        for name, sub_df in strategies.items():
-            if len(sub_df) > 0:
-                # 判斷是否為動態策略 (策略7)
-                if "皇冠" in name:
-                    wins = len(sub_df[sub_df['Is_Win_Dynamic'] == True])
-                    avg_profit = sub_df['Profit_Dynamic'].mean()
-                    note = "動態出場"
-                else:
-                    wins = len(sub_df[sub_df['Is_Win_Static'] == True])
-                    avg_profit = sub_df['Profit_Static'].mean()
-                    note = "持有20天"
-                    
-                win_rate = (wins / len(sub_df)) * 100
-                summary_list.append({"策略名稱": name, "模式": note, "交易次數": len(sub_df), "勝率 (%)": win_rate, "平均報酬 (%)": avg_profit})
-            else:
-                summary_list.append({"策略名稱": name, "模式": "-", "交易次數": 0, "勝率 (%)": 0, "平均報酬 (%)": 0})
-        
-        sum_df = pd.DataFrame(summary_list).sort_values(by="勝率 (%)", ascending=False)
-        st.dataframe(sum_df.style.background_gradient(subset=['勝率 (%)', '平均報酬 (%)'], cmap='RdYlGn'), use_container_width=True)
-        st.markdown("---")
+        res = pd.DataFrame(s_list).sort_values('勝率%', ascending=False)
+        st.dataframe(res.style.background_gradient(subset=['勝率%', '報酬%'], cmap='RdYlGn'), use_container_width=True)
 
-# 2. 單一回測報告
-if st.session_state['backtest_result'] is not None:
-    bt_df = st.session_state['backtest_result']
-    st.subheader("🧪 回測詳情")
-    if len(bt_df) > 0:
-        win_count = len(bt_df[bt_df['報酬率(%)'] > 0])
-        total_count = len(bt_df)
-        win_rate = int((win_count / total_count) * 100)
-        avg_ret = round(bt_df['報酬率(%)'].mean(), 2)
-        
-        col1, col2, col3 = st.columns(3)
-        col1.metric("交易次數", total_count)
-        col2.metric("勝率", f"{win_rate}%")
-        col3.metric("平均報酬", f"{avg_ret}%")
-        
-        def color_ret(val): return f'color: {"red" if val > 0 else "green"}'
-        st.dataframe(bt_df.style.map(color_ret, subset=['報酬率(%)']), use_container_width=True)
-    else:
-        st.warning("無符合條件之交易")
-    st.markdown("---")
+if st.session_state['bt'] is not None:
+    df = st.session_state['bt']
+    st.subheader("🧪 回測報告")
+    if not df.empty:
+        win = len(df[df['Ret']>0])
+        st.metric("勝率", f"{int(win/len(df)*100)}%", f"均報 {round(df['Ret'].mean(),2)}%")
+        st.dataframe(df.style.map(lambda v: f'color: {"red" if v>0 else "green"}', subset=['Ret']), use_container_width=True)
+    else: st.warning("無資料")
 
-# 3. 日常篩選
-if st.session_state['master_df'] is not None:
-    df = st.session_state['master_df'].copy()
-    df = df[df['abs_bias'] <= bias_threshold]
-    df = df[df['成交量'] >= (min_vol_input * 1000)]
+if st.session_state['mdf'] is not None:
+    df = st.session_state['mdf'].copy()
+    df = df[(df['abs_bias']<=bias) & (df['量']>=vol_min)]
+    if f_up: df = df[df['生命線'] < df['收盤']] # 簡易判斷，完整版可加趨勢
+    if f_tr: df = df[df['浴火']]
+    if f_cr: df = df[df['皇冠']]
+    if f_vo: df = df[df['量'] > df['昨量']*1.5]
     
-    if filter_trend_up: df = df[df['生命線趨勢'] == "⬆️向上"]
-    if filter_treasure: df = df[df['浴火重生'] == True]
-    if filter_obv: df = df[df['OBV趨勢'] == "🔥吸籌"]
-    if filter_vol_double: df = df[df['成交量'] > (df['昨日成交量'] * 1.5)]
-    if filter_crown: df = df[df['皇冠型態'] == True] # New
-
-    if len(df) == 0:
-        st.warning(f"⚠️ 找不到符合條件的股票！(若勾選皇冠特選，條件較嚴格)")
-    else:
-        st.success(f"🔍 篩選出 {len(df)} 檔股票")
-        df['成交量(張)'] = (df['成交量'] / 1000).astype(int)
-        df['選股標籤'] = df['代號'] + " " + df['名稱']
-        
-        tab1, tab2 = st.tabs(["📋 列表", "📊 走勢"])
-        with tab1:
-            st.dataframe(df[['代號', '名稱', '收盤價', '生命線', '乖離率(%)', '成交量(張)', '皇冠型態', 'OBV趨勢']], use_container_width=True, hide_index=True)
-        with tab2:
-            if len(df) > 0:
-                sel = st.selectbox("選擇股票：", df['選股標籤'].tolist())
-                row = df[df['選股標籤'] == sel].iloc[0]
-                plot_stock_chart(row['完整代號'], row['名稱'])
+    st.success(f"篩出 {len(df)} 檔")
+    c1, c2 = st.columns([1.5, 1])
+    with c1: st.dataframe(df, use_container_width=True)
+    with c2:
+        if not df.empty:
+            s = st.selectbox("選股看圖", df['完整代號'] + " " + df['名稱'])
+            row = df[df['完整代號']==s.split()[0]].iloc[0]
+            plot_chart(row['完整代號'], row['名稱'])
 else:
-    col1, col2, col3 = st.columns([1, 2, 1])
-    with col2:
-        if os.path.exists("welcome.jpg"): st.image("welcome.jpg", width=180)
+    st.image("welcome.jpg") if os.path.exists("welcome.jpg") else None
