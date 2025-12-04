@@ -9,7 +9,7 @@ import requests
 import os
 
 # --- 1. 網頁設定 ---
-VER = "ver3.12 (Fix)"
+VER = "ver3.13 (Royal Crown)"
 st.set_page_config(page_title=f"🍍 旺來-台股生命線({VER})", layout="wide")
 
 # --- 2. 核心功能區 ---
@@ -51,15 +51,15 @@ def calculate_kd_values(df, n=9):
     except:
         return 50, 50
 
-# --- 策略回測核心函數 (修正版: 包含關注中清單) ---
-def run_strategy_backtest(stock_dict, progress_bar, use_trend_up, use_treasure, use_vol):
+# --- 策略回測核心函數 (包含皇冠特選邏輯 + 成交量修復) ---
+def run_strategy_backtest(stock_dict, progress_bar, use_trend_up, use_treasure, use_vol, use_royal, min_vol_threshold):
     results = []
     all_tickers = list(stock_dict.keys())
     BATCH_SIZE = 50 
     total_batches = (len(all_tickers) // BATCH_SIZE) + 1
     
-    # 設定觀察期 (例如策略是看未來 10 日最高價)
-    OBSERVE_DAYS = 10 
+    # 一般策略觀察 10 天，皇冠策略觀察 20 天
+    OBSERVE_DAYS = 20 if use_royal else 10
     
     for i, batch_idx in enumerate(range(0, len(all_tickers), BATCH_SIZE)):
         batch = all_tickers[batch_idx : batch_idx + BATCH_SIZE]
@@ -80,10 +80,13 @@ def run_strategy_backtest(stock_dict, progress_bar, use_trend_up, use_treasure, 
                     df_l = df_l.to_frame(name=batch[0])
                     df_h = df_h.to_frame(name=batch[0])
 
+                # 計算均線
                 ma200_df = df_c.rolling(window=200).mean()
+                if use_royal:
+                    ma20_df = df_c.rolling(window=20).mean()
+                    ma60_df = df_c.rolling(window=60).mean()
                 
-                # --- 修改點 1: 掃描範圍改成直到最新一天 ---
-                # 原本只到 -10，現在改成到最後一天，以便抓出"關注中"的股票
+                # 掃描範圍直到最新
                 scan_window = df_c.index[-90:] 
                 
                 for ticker in df_c.columns:
@@ -92,95 +95,147 @@ def run_strategy_backtest(stock_dict, progress_bar, use_trend_up, use_treasure, 
                         v_series = df_v[ticker]
                         l_series = df_l[ticker]
                         h_series = df_h[ticker]
-                        ma_series = ma200_df[ticker]
+                        ma200_series = ma200_df[ticker]
+                        
+                        if use_royal:
+                            ma20_series = ma20_df[ticker]
+                            ma60_series = ma60_df[ticker]
                         
                         stock_name = stock_dict.get(ticker, {}).get('name', ticker)
-                        
-                        # 取得該股票最後有效交易日的索引長度
                         total_len = len(c_series)
 
                         for date in scan_window:
-                            if pd.isna(ma_series.get(date)): continue
-                            
-                            # 確保日期存在於該個股的索引中
+                            if pd.isna(ma200_series.get(date)): continue
                             if date not in c_series.index: continue
 
                             idx = c_series.index.get_loc(date)
-                            if idx < 20: continue 
+                            if idx < 200: continue # 皇冠需要足夠資料計算 MA200
 
                             close_p = c_series.iloc[idx]
-                            low_p = l_series.iloc[idx]
                             vol = v_series.iloc[idx]
                             prev_vol = v_series.iloc[idx-1]
-                            ma_val = ma_series.iloc[idx]
-                            ma_val_20ago = ma_series.iloc[idx-20]
+                            ma200_val = ma200_series.iloc[idx]
                             
-                            if ma_val == 0 or prev_vol == 0: continue
+                            # --- 修正點：嚴格執行最低成交量過濾 (單位：股，輸入為張) ---
+                            if vol < (min_vol_threshold * 1000): continue
+                            if ma200_val == 0 or prev_vol == 0: continue
 
                             is_match = False
                             
-                            if use_trend_up and (ma_val <= ma_val_20ago): continue
-                            if use_vol and (vol <= prev_vol * 1.5): continue
-
-                            if use_treasure:
-                                start_idx = idx - 7
-                                if start_idx < 0: continue
-                                recent_c = c_series.iloc[start_idx : idx+1]
-                                recent_ma = ma_series.iloc[start_idx : idx+1]
-                                cond_today_up = recent_c.iloc[-1] > recent_ma.iloc[-1]
-                                past_c = recent_c.iloc[:-1]
-                                past_ma = recent_ma.iloc[:-1]
-                                cond_past_down = (past_c < past_ma).any()
-                                if cond_today_up and cond_past_down: is_match = True
+                            # --- 分流：皇冠特選 vs 一般策略 ---
+                            if use_royal:
+                                # 皇冠條件：股價 > 20MA > 60MA > 200MA (多頭排列)
+                                ma20_val = ma20_series.iloc[idx]
+                                ma60_val = ma60_series.iloc[idx]
+                                
+                                # 必須有多頭排列
+                                if (close_p > ma20_val) and (ma20_val > ma60_val) and (ma60_val > ma200_val):
+                                    # 這裡可以額外加一個「靠近 20MA 進場」的濾網，或者只要排列正確就進
+                                    # 目前依需求：只要多頭排列即觸發
+                                    is_match = True
                             else:
-                                cond_near = (low_p <= ma_val * 1.03) and (low_p >= ma_val * 0.90) 
-                                cond_up = (close_p > ma_val)
-                                if cond_near and cond_up: is_match = True
+                                # 一般策略
+                                low_p = l_series.iloc[idx]
+                                ma_val_20ago = ma200_series.iloc[idx-20]
+                                
+                                if use_trend_up and (ma200_val <= ma_val_20ago): continue
+                                if use_vol and (vol <= prev_vol * 1.5): continue
+
+                                if use_treasure:
+                                    start_idx = idx - 7
+                                    if start_idx < 0: continue
+                                    recent_c = c_series.iloc[start_idx : idx+1]
+                                    recent_ma = ma200_series.iloc[start_idx : idx+1]
+                                    cond_today_up = recent_c.iloc[-1] > recent_ma.iloc[-1]
+                                    past_c = recent_c.iloc[:-1]
+                                    past_ma = recent_ma.iloc[:-1]
+                                    cond_past_down = (past_c < past_ma).any()
+                                    if cond_today_up and cond_past_down: is_match = True
+                                else:
+                                    cond_near = (low_p <= ma200_val * 1.03) and (low_p >= ma200_val * 0.90) 
+                                    cond_up = (close_p > ma200_val)
+                                    if cond_near and cond_up: is_match = True
                             
                             if is_match:
                                 month_str = date.strftime('%m月')
-                                
-                                # --- 修改點 2: 判斷是否為「關注中」 (未滿 10 天) ---
                                 days_after_signal = total_len - 1 - idx
                                 
-                                if days_after_signal < OBSERVE_DAYS:
-                                    # 時間不足 10 天，列為關注中
-                                    # 計算「目前」的漲幅供參考
-                                    current_price = c_series.iloc[-1]
-                                    current_profit = (current_price - close_p) / close_p * 100
+                                # --- 結果判定邏輯 ---
+                                final_profit_pct = 0.0
+                                result_status = "觀察中"
+                                is_watching = False
+
+                                if days_after_signal < 1: # 今天剛觸發，完全沒未來資料
+                                    is_watching = True
+                                    final_profit_pct = 0.0
                                     
-                                    results.append({
-                                        '月份': '👀 關注中', # 特殊分類
-                                        '代號': ticker.replace(".TW", "").replace(".TWO", ""),
-                                        '名稱': stock_name,
-                                        '訊號日期': date.strftime('%Y-%m-%d'),
-                                        '訊號價': round(close_p, 2),
-                                        '最高漲幅(%)': round(current_profit, 2), # 這裡放的是"至今漲幅"
-                                        '結果': "觀察中"
-                                    })
-                                else:
-                                    # 時間足夠，進行歷史驗證
-                                    future_highs = h_series.iloc[idx+1 : idx+1+OBSERVE_DAYS]
-                                    if len(future_highs) > 0:
-                                        max_price = future_highs.max()
-                                        max_profit_pct = (max_price - close_p) / close_p * 100
+                                elif use_royal:
+                                    # --- 皇冠策略：動態回測 (逐日檢查) ---
+                                    # 預設先設為觀察中，除非中途觸發出場
+                                    is_watching = True 
+                                    current_price = c_series.iloc[-1]
+                                    final_profit_pct = (current_price - close_p) / close_p * 100
+                                    
+                                    # 檢查接下來的每一天 (最多 20 天)
+                                    check_days = min(days_after_signal, OBSERVE_DAYS)
+                                    
+                                    for d in range(1, check_days + 1):
+                                        day_idx = idx + d
+                                        day_high = h_series.iloc[day_idx]
+                                        day_close = c_series.iloc[day_idx]
+                                        day_ma200 = ma200_series.iloc[day_idx]
                                         
-                                        if max_profit_pct > 3.0:
-                                            result_status = "驗證成功 🏆"
-                                        elif max_profit_pct > 0:
-                                            result_status = "Win (反彈)"
+                                        # 1. 停利檢查 (+10%)
+                                        if day_high >= close_p * 1.10:
+                                            final_profit_pct = 10.0
+                                            result_status = "Win (止盈出場) 👑"
+                                            is_watching = False # 已經結算
+                                            break
+                                        
+                                        # 2. 停損檢查 (收盤跌破 200MA)
+                                        if day_close < day_ma200:
+                                            final_profit_pct = (day_close - close_p) / close_p * 100
+                                            result_status = "Loss (破線停損) 🛑"
+                                            is_watching = False # 已經結算
+                                            break
+                                    
+                                    # 如果跑完了迴圈還沒出場
+                                    if is_watching:
+                                        if days_after_signal >= OBSERVE_DAYS:
+                                            # 時間到期，強制結算
+                                            end_close = c_series.iloc[idx + OBSERVE_DAYS]
+                                            final_profit_pct = (end_close - close_p) / close_p * 100
+                                            if final_profit_pct > 0: result_status = "Win (期滿獲利)"
+                                            else: result_status = "Loss (期滿虧損)"
+                                            is_watching = False
                                         else:
-                                            result_status = "Loss 📉"
+                                            # 時間還沒到，也沒觸發停損停利 -> 真正的「觀察中」
+                                            result_status = "觀察中"
+
+                                else:
+                                    # --- 一般策略：看區間最大值 ---
+                                    if days_after_signal < OBSERVE_DAYS:
+                                        current_price = c_series.iloc[-1]
+                                        final_profit_pct = (current_price - close_p) / close_p * 100
+                                        is_watching = True
+                                    else:
+                                        future_highs = h_series.iloc[idx+1 : idx+1+OBSERVE_DAYS]
+                                        max_price = future_highs.max()
+                                        final_profit_pct = (max_price - close_p) / close_p * 100
                                         
-                                        results.append({
-                                            '月份': month_str,
-                                            '代號': ticker.replace(".TW", "").replace(".TWO", ""),
-                                            '名稱': stock_name,
-                                            '訊號日期': date.strftime('%Y-%m-%d'),
-                                            '訊號價': round(close_p, 2),
-                                            '最高漲幅(%)': round(max_profit_pct, 2),
-                                            '結果': result_status
-                                        })
+                                        if final_profit_pct > 3.0: result_status = "驗證成功 🏆"
+                                        elif final_profit_pct > 0: result_status = "Win (反彈)"
+                                        else: result_status = "Loss 📉"
+
+                                results.append({
+                                    '月份': '👀 關注中' if is_watching else month_str,
+                                    '代號': ticker.replace(".TW", "").replace(".TWO", ""),
+                                    '名稱': stock_name,
+                                    '訊號日期': date.strftime('%Y-%m-%d'),
+                                    '訊號價': round(close_p, 2),
+                                    '最高漲幅(%)': round(final_profit_pct, 2),
+                                    '結果': "觀察中" if is_watching else result_status
+                                })
                                 break 
                     except:
                         continue
@@ -219,9 +274,15 @@ def fetch_all_data(stock_dict, progress_bar, status_text):
                     df_l = df_l.to_frame(name=batch[0])
                     df_v = df_v.to_frame(name=batch[0])
 
+                # 計算需要的均線 (含皇冠特選需要的 20/60MA)
                 ma200_df = df_c.rolling(window=200).mean()
+                ma20_df = df_c.rolling(window=20).mean()
+                ma60_df = df_c.rolling(window=60).mean()
+
                 last_price_series = df_c.iloc[-1]
                 last_ma200_series = ma200_df.iloc[-1]
+                last_ma20_series = ma20_df.iloc[-1]
+                last_ma60_series = ma60_df.iloc[-1]
                 prev_ma200_series = ma200_df.iloc[-21] 
                 
                 last_vol_series = df_v.iloc[-1]
@@ -234,6 +295,8 @@ def fetch_all_data(stock_dict, progress_bar, status_text):
                     try:
                         price = last_price_series[ticker]
                         ma200 = last_ma200_series[ticker]
+                        ma20 = last_ma20_series[ticker]
+                        ma60 = last_ma60_series[ticker]
                         prev_ma200 = prev_ma200_series[ticker]
                         
                         vol = last_vol_series[ticker]
@@ -243,6 +306,7 @@ def fetch_all_data(stock_dict, progress_bar, status_text):
 
                         ma_trend = "⬆️向上" if ma200 >= prev_ma200 else "⬇️向下"
 
+                        # 浴火重生判斷
                         is_treasure = False
                         my_recent_c = recent_close_df[ticker]
                         my_recent_ma = recent_ma200_df[ticker]
@@ -251,9 +315,12 @@ def fetch_all_data(stock_dict, progress_bar, status_text):
                             past_c = my_recent_c.iloc[:-1]
                             past_ma = my_recent_ma.iloc[:-1]
                             cond_past_down = (past_c < past_ma).any()
-                            
-                            if cond_today_up and cond_past_down:
-                                is_treasure = True
+                            if cond_today_up and cond_past_down: is_treasure = True
+
+                        # 皇冠特選判斷 (多頭排列)
+                        is_royal = False
+                        if (price > ma20) and (ma20 > ma60) and (ma60 > ma200):
+                            is_royal = True
 
                         stock_df = pd.DataFrame({'Close': df_c[ticker], 'High': df_h[ticker], 'Low': df_l[ticker]}).dropna()
                         k_val, d_val = 0, 0
@@ -270,6 +337,8 @@ def fetch_all_data(stock_dict, progress_bar, status_text):
                             '完整代號': ticker,
                             '收盤價': float(price),
                             '生命線': float(ma200),
+                            'MA20': float(ma20),
+                            'MA60': float(ma60),
                             '生命線趨勢': ma_trend,
                             '乖離率(%)': float(bias),
                             'abs_bias': abs(float(bias)),
@@ -278,7 +347,8 @@ def fetch_all_data(stock_dict, progress_bar, status_text):
                             'K值': float(k_val),
                             'D值': float(d_val),
                             '位置': "🟢生命線上" if price >= ma200 else "🔴生命線下",
-                            '浴火重生': is_treasure
+                            '浴火重生': is_treasure,
+                            '皇冠特選': is_royal
                         })
                     except: continue
         except: pass
@@ -299,6 +369,8 @@ def plot_stock_chart(ticker, name):
             return
 
         df['200MA'] = df['Close'].rolling(window=200).mean()
+        df['20MA'] = df['Close'].rolling(window=20).mean()
+        df['60MA'] = df['Close'].rolling(window=60).mean()
         
         # 只顯示近半年
         plot_df = df.tail(120).copy()
@@ -306,42 +378,21 @@ def plot_stock_chart(ticker, name):
 
         fig = go.Figure()
         
-        # --- 改版：捨棄 K 線，改用純線圖 (Line Chart) ---
-        # 1. 收盤價曲線 (綠色/藍色系，代表股價走勢)
-        fig.add_trace(go.Scatter(
-            x=plot_df['DateStr'], 
-            y=plot_df['Close'], 
-            mode='lines',
-            name='收盤價',
-            line=dict(color='#00CC96', width=2.5) # 亮綠色
-        ))
+        # 1. 收盤價
+        fig.add_trace(go.Scatter(x=plot_df['DateStr'], y=plot_df['Close'], mode='lines', name='收盤價', line=dict(color='#00CC96', width=2.5)))
         
-        # 2. 生命線 (橘色粗線)
-        fig.add_trace(go.Scatter(
-            x=plot_df['DateStr'], 
-            y=plot_df['200MA'], 
-            mode='lines',
-            name='生命線',
-            line=dict(color='#FFA15A', width=3) # 橘色
-        ))
+        # 2. 均線群
+        fig.add_trace(go.Scatter(x=plot_df['DateStr'], y=plot_df['20MA'], mode='lines', name='20MA(月線)', line=dict(color='#AB63FA', width=1, dash='dot')))
+        fig.add_trace(go.Scatter(x=plot_df['DateStr'], y=plot_df['60MA'], mode='lines', name='60MA(季線)', line=dict(color='#19D3F3', width=1, dash='dot')))
+        fig.add_trace(go.Scatter(x=plot_df['DateStr'], y=plot_df['200MA'], mode='lines', name='200MA(生命線)', line=dict(color='#FFA15A', width=3)))
 
         fig.update_layout(
-            title=f"📊 {name} ({ticker}) 股價 vs 生命線趨勢", 
+            title=f"📊 {name} ({ticker}) 股價 vs 均線排列", 
             yaxis_title='價格', 
             height=500, 
             hovermode="x unified",
-            xaxis=dict(
-                type='category', 
-                tickangle=-45, 
-                nticks=20
-            ),
-            legend=dict(
-                orientation="h",
-                yanchor="bottom",
-                y=1.02,
-                xanchor="right",
-                x=1
-            )
+            xaxis=dict(type='category', tickangle=-45, nticks=20),
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
         )
         st.plotly_chart(fig, use_container_width=True)
     except Exception as e: st.error(f"繪圖失敗: {e}")
@@ -374,15 +425,9 @@ with st.sidebar:
         else:
             placeholder_emoji = st.empty() 
             with placeholder_emoji:
-                st.markdown("""
-                    <div style="text-align: center; font-size: 40px; animation: blink 1s infinite;">
-                        🎁💰✨
-                    </div>
-                    <style>
-                    @keyframes blink { 0% { opacity: 1; } 50% { opacity: 0.5; } 100% { opacity: 1; } }
-                    </style>
-                    <div style="text-align: center;">正在開鎖寶箱...</div>
-                """, unsafe_allow_html=True)
+                st.markdown("""<div style="text-align: center; font-size: 40px; animation: blink 1s infinite;">🎁💰✨</div>
+                    <style>@keyframes blink { 0% { opacity: 1; } 50% { opacity: 0.5; } 100% { opacity: 1; } }</style>
+                    <div style="text-align: center;">正在開鎖寶箱...</div>""", unsafe_allow_html=True)
             
             status_text = st.empty()
             progress_bar = st.progress(0, text="準備下載...")
@@ -390,7 +435,6 @@ with st.sidebar:
             df = fetch_all_data(stock_dict, progress_bar, status_text)
             
             placeholder_emoji.empty()
-            
             st.session_state['master_df'] = df
             st.session_state['last_update'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             progress_bar.empty()
@@ -402,48 +446,80 @@ with st.sidebar:
     st.divider()
     st.header("2. 即時篩選器")
     bias_threshold = st.slider("乖離率範圍 (±%)", 0.5, 5.0, 2.5, step=0.1)
-    st.caption("設定股價距離「生命線」多近視為符合條件。")
     min_vol_input = st.number_input("最低成交量 (張)", value=1000, step=100)
     
-    st.subheader("進階條件")
+    st.subheader("策略選擇")
     
-    filter_trend_up = st.checkbox("📈 生命線向上 (多方助漲)", value=False)
-    filter_trend_down = st.checkbox("📉 生命線向下 (空方壓力)", value=False)
+    # 將策略選項互斥化，避免邏輯衝突
+    strategy_mode = st.radio(
+        "選擇篩選策略：",
+        ("基礎生命線 (反彈/支撐)", "🔥 浴火重生 (假跌破)", "👑 皇冠特選 (多頭排列)")
+    )
+
+    st.caption("細部條件：")
     
-    filter_treasure = st.checkbox("🔥 浴火重生 (假跌破拉回)", value=False)
-    st.caption("🔍 尋找過去7日內曾跌破，但今日站回生命線的強勢股")
+    # 根據不同策略顯示不同選項
+    filter_trend_up = False
+    filter_trend_down = False
+    filter_kd = False
+    filter_vol_double = False
+    filter_royal = False
+    filter_treasure = False
+
+    if strategy_mode == "基礎生命線 (反彈/支撐)":
+        col1, col2 = st.columns(2)
+        with col1: filter_trend_up = st.checkbox("生命線向上", value=False)
+        with col2: filter_trend_down = st.checkbox("生命線向下", value=False)
+        filter_kd = st.checkbox("KD 黃金交叉", value=False)
+        filter_vol_double = st.checkbox("出量 (今日 > 昨日x1.5)", value=False)
     
-    filter_kd = st.checkbox("KD 黃金交叉 (K > D)", value=False)
-    filter_vol_double = st.checkbox("出量 (今日 > 昨日x1.5)", value=False)
-    
+    elif strategy_mode == "🔥 浴火重生 (假跌破)":
+        filter_treasure = True
+        st.info("ℹ️ 尋找：過去7日內曾跌破，但今日站回生命線的個股。")
+        filter_vol_double = st.checkbox("出量確認", value=False)
+
+    elif strategy_mode == "👑 皇冠特選 (多頭排列)":
+        filter_royal = True
+        st.info("ℹ️ 條件：股價 > 20MA > 60MA > 200MA (多頭強勢股)")
+        st.markdown("""
+        **回測規則 (更嚴格)：**
+        * **停利**：20天內任一天觸及 +10%
+        * **停損**：收盤價跌破 200MA
+        """)
+        filter_vol_double = st.checkbox("出量確認", value=False)
+
     st.divider()
     
-    st.caption("⚠️ 注意：回測需調閱2年歷史資料，運算時間較長 (約2分鐘)。")
+    st.caption("⚠️ 回測將使用上方設定的「最低成交量」進行過濾。")
     if st.button("🧪 策略回測 (近3個月表現)"):
         st.info("阿吉正在調閱過去2年的歷史檔案，進行深度驗證... (請稍候) ⏳")
         stock_dict = get_stock_list()
         bt_progress = st.progress(0, text="初始化回測...")
         
+        # 根據 radio button 設定參數
+        use_treasure_param = True if strategy_mode == "🔥 浴火重生 (假跌破)" else False
+        use_royal_param = True if strategy_mode == "👑 皇冠特選 (多頭排列)" else False
+        
         bt_df = run_strategy_backtest(
             stock_dict, 
             bt_progress, 
             use_trend_up=filter_trend_up, 
-            use_treasure=filter_treasure, 
-            use_vol=filter_vol_double
+            use_treasure=use_treasure_param, 
+            use_vol=filter_vol_double,
+            use_royal=use_royal_param,
+            min_vol_threshold=min_vol_input # 傳入成交量過濾
         )
         
         st.session_state['backtest_result'] = bt_df
         bt_progress.empty()
         st.success("回測完成！請查看下方結果。")
 
-    with st.expander("📅 系統開發日誌 (Changelog)"):
+    with st.expander("📅 系統開發日誌"):
         st.markdown("""
-        ### Ver 3.12 (Fix)
-        * **Fix**: 修正回測邏輯，解決「近期股票因時間不足而被忽略」的問題。
-        * **New Feature**: 新增「👀 旺來關注中」區塊，專門顯示觸發訊號未滿 10 天的潛力股，與歷史勝率統計分開，數據更精準。
-
-        ### Ver 3.11 (Simple Line Chart)
-        * **Visual**: 圖表改版，捨棄 K 線，改用純粹的「收盤價 vs 生命線」雙線圖，趨勢一目了然。
+        ### Ver 3.13 (Royal Crown)
+        * **New**: 新增「👑 皇冠特選」策略，專找多頭排列強勢股。
+        * **Logic**: 皇冠策略採用動態出場機制 (觸及+10%停利，收盤破200MA停損)。
+        * **Fix**: 修復回測時未濾除低成交量個股的問題 (現在會依照設定的最低張數過濾)。
         """)
 
 # 主畫面 - 回測報告
@@ -451,101 +527,99 @@ if st.session_state['backtest_result'] is not None:
     bt_df = st.session_state['backtest_result']
     st.markdown("---")
     
-    strategy_name = "基礎策略"
-    if filter_treasure: strategy_name = "浴火重生(假跌破)"
-    elif filter_trend_up: strategy_name = "趨勢向上 + 支撐"
+    s_name = "基礎策略"
+    if filter_treasure: s_name = "🔥 浴火重生"
+    elif filter_royal: s_name = "👑 皇冠特選"
     
-    st.subheader(f"🧪 策略回測報告：{strategy_name}")
+    st.subheader(f"🧪 策略回測報告：{s_name}")
 
-    # --- 新增：將資料分為「歷史驗證」與「關注中」 ---
     df_history = bt_df[bt_df['結果'] != "觀察中"].copy()
     df_watching = bt_df[bt_df['結果'] == "觀察中"].copy()
     
-    # 1. 顯示「旺來關注中」 (最近觸發的訊號)
+    # 1. 關注中
     if not df_watching.empty:
         st.markdown(f"""
         <div style="background-color: #fff8dc; padding: 15px; border-radius: 10px; border: 2px solid #ffa500; margin-bottom: 20px;">
-            <h3 style="color: #d2691e; margin:0;">👀 旺來關注中 (近 10 日訊號)</h3>
-            <p style="color: #666; margin:5px 0 0 0;">這些股票最近才觸發訊號，尚未滿足 10 天驗證期。<b>「最高漲幅」代表觸發至今的表現。</b></p>
+            <h3 style="color: #d2691e; margin:0;">👀 旺來關注中 (進行中訊號)</h3>
+            <p style="color: #666; margin:5px 0 0 0;">{'這些股票尚未觸發停利(+10%)或停損(破線)。' if filter_royal else '這些股票訊號發生未滿 10 天。'}</p>
         </div>
         """, unsafe_allow_html=True)
         
-        # 整理顯示欄位，讓關注中列表更清楚
         df_watching = df_watching.sort_values(by='訊號日期', ascending=False)
         st.dataframe(
             df_watching[['代號', '名稱', '訊號日期', '訊號價', '最高漲幅(%)']].style.background_gradient(cmap='Reds', subset=['最高漲幅(%)']),
-            use_container_width=True,
-            hide_index=True
+            use_container_width=True, hide_index=True
         )
     else:
-        st.info("👀 最近 10 天內沒有新的觸發訊號。")
+        st.info("👀 目前沒有符合「關注中」的股票。")
 
     st.markdown("---")
     st.markdown("### 📜 歷史驗證數據 (已結算)")
 
-    # 2. 顯示歷史驗證數據 (原有邏輯)
+    # 2. 歷史數據
     if len(df_history) > 0:
         months = sorted(df_history['月份'].unique())
-        
         tabs = st.tabs(["📊 總覽"] + months)
         
         with tabs[0]:
-            win_count = len(df_history[df_history['結果'].str.contains("Win") | df_history['結果'].str.contains("驗證成功")])
+            # 統計包含 Win 與 驗證成功
+            win_df = df_history[df_history['結果'].str.contains("Win") | df_history['結果'].str.contains("驗證成功")]
+            win_count = len(win_df)
             total_count = len(df_history)
             win_rate = int((win_count / total_count) * 100) if total_count > 0 else 0
             avg_max_ret = round(df_history['最高漲幅(%)'].mean(), 2)
             
             col1, col2, col3 = st.columns(3)
-            col1.metric("總觸發次數", total_count)
-            col2.metric("總反彈機率 (漲幅>0%)", f"{win_rate}%")
-            col3.metric("總平均最高漲幅", f"{avg_max_ret}%")
+            col1.metric("總已結算次數", total_count)
+            col2.metric("獲利機率", f"{win_rate}%")
+            col3.metric("平均損益(%)", f"{avg_max_ret}%")
             st.dataframe(df_history, use_container_width=True)
 
         for i, m in enumerate(months):
             with tabs[i+1]:
                 m_df = df_history[df_history['月份'] == m]
-                
                 m_win = len(m_df[m_df['結果'].str.contains("Win") | m_df['結果'].str.contains("驗證成功")])
                 m_total = len(m_df)
                 m_rate = int((m_win / m_total) * 100) if m_total > 0 else 0
                 m_avg = round(m_df['最高漲幅(%)'].mean(), 2) if m_total > 0 else 0
                 
                 c1, c2, c3 = st.columns(3)
-                c1.metric(f"{m} 觸發次數", m_total)
-                c2.metric(f"{m} 反彈機率", f"{m_rate}%")
-                c3.metric(f"{m} 平均漲幅", f"{m_avg}%")
+                c1.metric(f"{m} 結算次數", m_total)
+                c2.metric(f"{m} 獲利機率", f"{m_rate}%")
+                c3.metric(f"{m} 平均損益", f"{m_avg}%")
                 
-                def color_ret(val):
-                    color = 'red' if val > 0 else 'green'
-                    return f'color: {color}'
+                def color_ret(val): return f'color: {"red" if val > 0 else "green"}'
                 st.dataframe(m_df.style.map(color_ret, subset=['最高漲幅(%)']), use_container_width=True)
-
     else:
-        st.warning("在此回測期間內，沒有歷史股票符合您目前勾選的條件組合。")
+        st.warning("在此回測期間內，沒有歷史股票符合條件。")
     st.markdown("---")
 
 # 主畫面 - 日常篩選
 if st.session_state['master_df'] is not None:
     df = st.session_state['master_df'].copy()
     
-    # 防呆
     if '生命線' not in df.columns:
-        st.error("⚠️ 資料結構已更新！請點擊左側紅色的 **「🔄 更新股價資料」** 按鈕。")
+        st.error("⚠️ 資料結構已更新！請點擊 **「🔄 更新股價資料」**。")
         st.stop()
 
-    df = df[df['abs_bias'] <= bias_threshold]
+    # 基礎過濾
     df = df[df['成交量'] >= (min_vol_input * 1000)]
     
-    if filter_trend_up and filter_trend_down:
-        st.error("❌ 請勿同時勾選「生命線向上」與「生命線向下」，這兩個條件是互斥的！")
-        df = df[0:0] 
-    elif filter_trend_up:
-        df = df[df['生命線趨勢'] == "⬆️向上"]
-    elif filter_trend_down:
-        df = df[df['生命線趨勢'] == "⬇️向下"]
-
-    if filter_treasure: df = df[df['浴火重生'] == True]
-    if filter_kd: df = df[df['K值'] > df['D值']]
+    # 策略分流篩選
+    if strategy_mode == "🔥 浴火重生 (假跌破)":
+        df = df[df['浴火重生'] == True]
+    elif strategy_mode == "👑 皇冠特選 (多頭排列)":
+        if '皇冠特選' in df.columns:
+            df = df[df['皇冠特選'] == True]
+        else:
+            # 相容性處理，若按了更新但 cache 還是舊的
+            df = df[(df['收盤價'] > df['MA20']) & (df['MA20'] > df['MA60']) & (df['MA60'] > df['生命線'])]
+    else:
+        # 基礎策略
+        df = df[df['abs_bias'] <= bias_threshold]
+        if filter_trend_up: df = df[df['生命線趨勢'] == "⬆️向上"]
+        elif filter_trend_down: df = df[df['生命線趨勢'] == "⬇️向下"]
+        if filter_kd: df = df[df['K值'] > df['D值']]
     
     if filter_vol_double: 
         df = df[df['成交量'] > (df['昨日成交量'] * 1.5)]
@@ -555,7 +629,7 @@ if st.session_state['master_df'] is not None:
     else:
         st.markdown(f"""
         <div style="background-color: #f0f2f6; padding: 15px; border-radius: 10px; text-align: center; border: 2px solid #ff4b4b;">
-            <h2 style="color: #333; margin:0;">🔍 根據目前條件，共篩選出 <span style="color: #ff4b4b; font-size: 1.5em;">{len(df)}</span> 檔股票</h2>
+            <h2 style="color: #333; margin:0;">🔍 根據【{strategy_mode}】，共篩選出 <span style="color: #ff4b4b; font-size: 1.5em;">{len(df)}</span> 檔股票</h2>
         </div>
         <br>
         """, unsafe_allow_html=True)
@@ -564,41 +638,31 @@ if st.session_state['master_df'] is not None:
         df['KD值'] = df.apply(lambda x: f"K:{int(x['K值'])} D:{int(x['D值'])}", axis=1)
         df['選股標籤'] = df['代號'] + " " + df['名稱']
         
-        display_cols = ['代號', '名稱', '收盤價', '生命線', '生命線趨勢', '乖離率(%)', '位置', 'KD值', '成交量(張)']
-        if filter_treasure:
-             df = df.sort_values(by='成交量', ascending=False)
-        else:
-             df = df.sort_values(by='abs_bias')
+        display_cols = ['代號', '名稱', '收盤價', '生命線', '乖離率(%)', '位置', 'KD值', '成交量(張)']
+        if strategy_mode == "👑 皇冠特選 (多頭排列)":
+            display_cols = ['代號', '名稱', '收盤價', 'MA20', 'MA60', '生命線', 'KD值', '成交量(張)']
+            
+        df = df.sort_values(by='成交量', ascending=False)
         
         tab1, tab2 = st.tabs(["📋 篩選結果列表", "📊 日趨勢圖"])
         
         with tab1:
             def highlight_row(row):
-                if row['位置'] == "🟢生命線上":
-                    return ['background-color: #e6fffa; color: black'] * len(row)
-                else:
-                    return ['background-color: #fff0f0; color: black'] * len(row)
+                return ['background-color: #e6fffa; color: black'] * len(row) if row['收盤價'] > row['生命線'] else ['background-color: #fff0f0; color: black'] * len(row)
 
-            st.dataframe(
-                df[display_cols].style.apply(highlight_row, axis=1),
-                use_container_width=True,
-                hide_index=True
-            )
+            st.dataframe(df[display_cols].style.apply(highlight_row, axis=1), use_container_width=True, hide_index=True)
 
         with tab2:
-            st.markdown("### 🔍 個股近半年趨勢圖")
+            st.markdown("### 🔍 個股趨勢圖")
             if len(df) > 0:
                 selected_stock_label = st.selectbox("請選擇一檔股票：", df['選股標籤'].tolist())
                 selected_row = df[df['選股標籤'] == selected_stock_label].iloc[0]
-                target_ticker = selected_row['完整代號']
-                target_name = selected_row['名稱']
+                plot_stock_chart(selected_row['完整代號'], selected_row['名稱'])
                 
-                plot_stock_chart(target_ticker, target_name)
-                
-                col1, col2, col3 = st.columns(3)
-                col1.metric("目前股價", selected_row['收盤價'])
-                col2.metric("生命線", selected_row['生命線'], delta=f"{selected_row['乖離率(%)']}%")
-                col3.metric("KD指標", selected_row['KD值'])
+                c1, c2, c3 = st.columns(3)
+                c1.metric("收盤價", selected_row['收盤價'])
+                c2.metric("成交量", f"{selected_row['成交量(張)']} 張")
+                c3.metric("KD", selected_row['KD值'])
 
 else:
     st.warning("👈 請先點擊左側 sidebar 的 **「🔄 更新股價資料」** 按鈕開始挖寶！")
@@ -606,18 +670,9 @@ else:
     col1, col2, col3 = st.columns([1, 2, 1])
     with col2:
         if os.path.exists("welcome.jpg"):
-            st.markdown(
-                """
-                <div style="text-align: center; color: #333333; font-size: 1.1em; margin-bottom: 20px; line-height: 1.6; font-weight: bold;">
-                    這是數年來的經驗收納<br>
-                    此工具僅供參考，不代表投資建議<br>
-                    預祝心想事成，從從容容，紫氣東來! 🟣✨
-                </div>
-                """,
-                unsafe_allow_html=True
-            )
+            st.markdown("""<div style="text-align: center; font-size: 1.1em; margin-bottom: 20px;">
+                這是數年來的經驗收納<br>此工具僅供參考，不代表投資建議<br>預祝心想事成，從從容容，紫氣東來! 🟣✨</div>""", unsafe_allow_html=True)
             sub_c1, sub_c2, sub_c3 = st.columns([1, 1, 1])
-            with sub_c2:
-                 st.image("welcome.jpg", width=180)
+            with sub_c2: st.image("welcome.jpg", width=180)
         else:
-            st.info("💡 尚未偵測到 welcome.jpg，請將您的紫色招財圖上傳至 GitHub 並命名為 welcome.jpg，這裡就會顯示囉！")
+            st.info("💡 尚未偵測到 welcome.jpg")
