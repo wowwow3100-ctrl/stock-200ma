@@ -9,7 +9,7 @@ import numpy as np
 import os
 
 # --- 1. 網頁設定 ---
-VER = "ver4.2_Ultimate"
+VER = "ver4.3_WideRange"
 st.set_page_config(page_title=f"🍍 旺來-台股生命線({VER})", layout="wide")
 
 # --- 2. 核心功能區 ---
@@ -51,7 +51,7 @@ def calculate_kd_values(df, n=9):
     except:
         return 50, 50
 
-# --- 【核心修正】策略回測函數 (整合第二版邏輯) ---
+# --- 策略回測函數 ---
 def run_strategy_backtest(stock_dict, progress_bar, use_trend_up, use_treasure, use_vol):
     results = []
     all_tickers = list(stock_dict.keys())
@@ -61,7 +61,6 @@ def run_strategy_backtest(stock_dict, progress_bar, use_trend_up, use_treasure, 
     for i, batch_idx in enumerate(range(0, len(all_tickers), BATCH_SIZE)):
         batch = all_tickers[batch_idx : batch_idx + BATCH_SIZE]
         try:
-            # 下載 2 年數據以確保有足夠的移動平均線和未來驗證數據
             data = yf.download(batch, period="2y", interval="1d", progress=False, auto_adjust=False)
             if not data.empty:
                 try:
@@ -72,7 +71,6 @@ def run_strategy_backtest(stock_dict, progress_bar, use_trend_up, use_treasure, 
                 except KeyError:
                     continue
                 
-                # 處理單一股票的情況 (Series 轉 DataFrame)
                 if isinstance(df_c, pd.Series):
                     df_c = df_c.to_frame(name=batch[0])
                     df_v = df_v.to_frame(name=batch[0])
@@ -80,8 +78,6 @@ def run_strategy_backtest(stock_dict, progress_bar, use_trend_up, use_treasure, 
                     df_h = df_h.to_frame(name=batch[0])
 
                 ma200_df = df_c.rolling(window=200).mean()
-                
-                # 掃描窗口：保留最後 20 天作為驗證期 (避免 index out of bound)，只回測到 20 天前
                 scan_window = df_c.index[-250:-20] 
                 
                 for ticker in df_c.columns:
@@ -98,7 +94,6 @@ def run_strategy_backtest(stock_dict, progress_bar, use_trend_up, use_treasure, 
                             if pd.isna(ma_series[date]): continue
                             
                             idx = c_series.index.get_loc(date)
-                            # 確保有足夠的歷史數據進行判斷
                             if idx < 20: continue 
 
                             close_p = c_series.iloc[idx]
@@ -112,7 +107,6 @@ def run_strategy_backtest(stock_dict, progress_bar, use_trend_up, use_treasure, 
 
                             is_match = False
                             
-                            # --- 策略判斷邏輯 (與第一版相同) ---
                             if use_trend_up and (ma_val <= ma_val_20ago): continue
                             if use_vol and (vol <= prev_vol * 1.5): continue
 
@@ -127,15 +121,11 @@ def run_strategy_backtest(stock_dict, progress_bar, use_trend_up, use_treasure, 
                                 cond_past_down = (past_c < past_ma).any()
                                 if cond_today_up and cond_past_down: is_match = True
                             else:
-                                # 一般策略：接近均線且在均線上
                                 cond_near = (low_p <= ma_val * 1.03) and (low_p >= ma_val * 0.90) 
                                 cond_up = (close_p > ma_val)
                                 if cond_near and cond_up: is_match = True
                             
-                            # --- 【第二版邏輯植入】驗證與數據計算 ---
                             if is_match:
-                                # 1. 驗證：抓取未來第 20 個交易日的收盤價
-                                # 檢查是否還有未來 20 天的數據
                                 if idx + 20 < len(c_series):
                                     future_close = c_series.iloc[idx + 20]
                                     profit_pct = (future_close - close_p) / close_p * 100
@@ -145,51 +135,41 @@ def run_strategy_backtest(stock_dict, progress_bar, use_trend_up, use_treasure, 
                                     else:
                                         result_status = "Loss (下跌)"
                                 else:
-                                    # 如果是最近一個月內的訊號，還沒有第 20 天的數據
                                     profit_pct = np.nan
                                     result_status = "統計中"
 
-                                month_str = date.strftime('%Y-%m') # 使用 年-月 格式方便排序
+                                month_str = date.strftime('%Y-%m')
                                 
                                 results.append({
                                     '月份': month_str,
-                                    'StockID': stock_code, # 為了配合第二版邏輯，使用 StockID
+                                    'StockID': stock_code,
                                     '名稱': stock_name,
-                                    'Date': date, # 保留 datetime 物件方便排序
+                                    'Date': date,
                                     '訊號日期': date.strftime('%Y-%m-%d'),
                                     '訊號價': float(close_p),
                                     '未來20日收盤': float(future_close) if not np.isnan(profit_pct) else np.nan,
                                     '一個月內漲幅(%)': float(profit_pct) if not np.isnan(profit_pct) else np.nan,
                                     '結果': result_status
                                 })
-                                # 一個月內同一支股票只取一次訊號，避免重複計算 (Skip next 20 days)
-                                # 這裡簡化處理，直接 break 當月循環或由使用者自行判斷
-                                # 在此版本我們記錄所有觸發點，讓「觸發次數」功能生效
-                                
                     except Exception as e:
                         continue
         except:
             pass
         
         progress = (i + 1) / total_batches
-        progress_bar.progress(progress, text=f"深度回測中 (整合第二版驗證邏輯)...({int(progress*100)}%)")
+        progress_bar.progress(progress, text=f"深度回測中...({int(progress*100)}%)")
         
-    # --- 【第二版後處理】統計與日誌生成 ---
     if not results:
         return pd.DataFrame()
 
     df_results = pd.DataFrame(results)
-
-    # 1. 觸發次數統計 (Count)
     df_results['觸發次數'] = df_results.groupby('StockID')['StockID'].transform('count')
 
-    # 2. 數據淨化 (Rounding)
     numeric_cols = ['訊號價', '未來20日收盤', '一個月內漲幅(%)']
     for col in numeric_cols:
         if col in df_results.columns:
             df_results[col] = df_results[col].round(2)
 
-    # 3. 詳細日誌 (Log)
     def generate_log(row):
         rise_pct = f"{row['一個月內漲幅(%)']}%" if not pd.isna(row['一個月內漲幅(%)']) else "統計中"
         return (f"日期: {row['訊號日期']} | "
@@ -199,13 +179,11 @@ def run_strategy_backtest(stock_dict, progress_bar, use_trend_up, use_treasure, 
                 f"後續漲幅: {rise_pct}")
 
     df_results['紀錄日誌'] = df_results.apply(generate_log, axis=1)
-    
-    # 依照日期排序
     df_results = df_results.sort_values(by=['Date', 'StockID'], ascending=[False, True])
     
     return df_results
 
-# --- 即時資料抓取 (維持第一版架構，加入數據淨化) ---
+# --- 即時資料抓取 ---
 def fetch_all_data(stock_dict, progress_bar, status_text):
     if not stock_dict: return pd.DataFrame()
     
@@ -282,15 +260,15 @@ def fetch_all_data(stock_dict, progress_bar, status_text):
                             '代號': stock_info['code'],
                             '名稱': stock_info['name'],
                             '完整代號': ticker,
-                            '收盤價': round(float(price), 2),     # 數據淨化
-                            '生命線': round(float(ma200), 2),     # 數據淨化
+                            '收盤價': round(float(price), 2),
+                            '生命線': round(float(ma200), 2),
                             '生命線趨勢': ma_trend,
-                            '乖離率(%)': round(float(bias), 2),   # 數據淨化
+                            '乖離率(%)': round(float(bias), 2),
                             'abs_bias': abs(float(bias)),
                             '成交量': int(vol),
                             '昨日成交量': int(prev_vol),
-                            'K值': round(float(k_val), 2),        # 數據淨化
-                            'D值': round(float(d_val), 2),        # 數據淨化
+                            'K值': round(float(k_val), 2),
+                            'D值': round(float(d_val), 2),
                             '位置': "🟢生命線上" if price >= ma200 else "🔴生命線下",
                             '浴火重生': is_treasure
                         })
@@ -319,7 +297,6 @@ def plot_stock_chart(ticker, name):
 
         fig = go.Figure()
         
-        # 純線圖 (Line Chart) - 第一版風格
         fig.add_trace(go.Scatter(
             x=plot_df['DateStr'], 
             y=plot_df['Close'], 
@@ -402,8 +379,13 @@ with st.sidebar:
     
     st.divider()
     st.header("2. 即時篩選器")
-    bias_threshold = st.slider("乖離率範圍 (±%)", 0.5, 5.0, 2.5, step=0.1)
+    
+    # --- 【修改點】預設改為 5.0，最大值放寬到 20.0 ---
+    bias_threshold = st.slider("乖離率範圍 (±%)", 0.5, 20.0, 5.0, step=0.1)
     st.caption("設定股價距離「生命線」多近視為符合條件。")
+    # --- 【修改點】新增備註 ---
+    st.info("💡 備註：設定 5% 以上可能會選到「當日接近生命線但已經噴出去」的強勢股。")
+
     min_vol_input = st.number_input("最低成交量 (張)", value=1000, step=100)
     
     st.subheader("進階條件")
@@ -439,11 +421,12 @@ with st.sidebar:
 
     with st.expander("📅 系統開發日誌"):
         st.markdown("""
+        ### Ver 4.3 (Wide Range)
+        * **UI**: 乖離率預設值改為 5.0%，最大值開放至 20.0%。
+        * **Note**: 新增高乖離率操作提示，方便捕捉噴出股。
+
         ### Ver 4.2 (Hybrid)
         * **Merge**: 完美結合第一版介面與第二版驗證核心。
-        * **Logic**: 驗證指標改為「訊號後第20日收盤價」計算真實月漲幅。
-        * **Feature**: 新增「觸發次數」統計，識別熱門股。
-        * **UI**: 報表增加「紀錄日誌」字串，數據全面保留小數點後兩位。
         """)
 
 # 主畫面 - 回測報告
@@ -459,14 +442,13 @@ if st.session_state['backtest_result'] is not None:
     st.caption("驗證邏輯：計算訊號觸發後，持有 **20個交易日(約一個月)** 的漲跌幅表現。")
     
     if len(bt_df) > 0:
-        months = sorted(bt_df['月份'].unique(), reverse=True) # 新的月份在前面
+        months = sorted(bt_df['月份'].unique(), reverse=True) 
         
         tabs = st.tabs(["📊 總覽 (含日誌)"] + months)
         
         with tabs[0]:
-            # 統計
             win_count = len(bt_df[bt_df['結果'].str.contains("Win")])
-            valid_df = bt_df.dropna(subset=['一個月內漲幅(%)']) # 只計算有驗證結果的
+            valid_df = bt_df.dropna(subset=['一個月內漲幅(%)'])
             total_count = len(valid_df)
             
             win_rate = int((win_count / total_count) * 100) if total_count > 0 else 0
@@ -477,7 +459,6 @@ if st.session_state['backtest_result'] is not None:
             col2.metric("20日後上漲機率", f"{win_rate}%")
             col3.metric("平均月漲幅", f"{avg_ret}%")
             
-            # 顯示完整表格 (含新欄位)
             show_cols = ['訊號日期', 'StockID', '名稱', '訊號價', '觸發次數', '未來20日收盤', '一個月內漲幅(%)', '紀錄日誌']
             
             def color_ret(val):
@@ -498,4 +479,35 @@ if st.session_state['backtest_result'] is not None:
                 m_win = len(m_valid[m_valid['一個月內漲幅(%)'] > 0])
                 m_total = len(m_valid)
                 m_rate = int((m_win / m_total) * 100) if m_total > 0 else 0
+                m_avg = round(m_valid['一個月內漲幅(%)'].mean(), 2) if m_total > 0 else 0
+                
+                c1, c2, c3 = st.columns(3)
+                c1.metric(f"{m} 訊號數", len(m_df))
+                c2.metric("上漲機率", f"{m_rate}%")
+                c3.metric("平均漲幅", f"{m_avg}%")
+                
+                st.dataframe(
+                    m_df[show_cols].style.map(color_ret, subset=['一個月內漲幅(%)']), 
+                    use_container_width=True
+                )
+
+    else:
+        st.warning("在此回測期間內，沒有股票符合您目前勾選的條件組合。")
+    st.markdown("---")
+
+# 主畫面 - 日常篩選
+if st.session_state['master_df'] is not None:
+    df = st.session_state['master_df'].copy()
     
+    if '生命線' not in df.columns:
+        st.error("⚠️ 資料結構已更新！請點擊左側紅色的 **「🔄 更新股價資料」** 按鈕。")
+        st.stop()
+
+    df = df[df['abs_bias'] <= bias_threshold]
+    df = df[df['成交量'] >= (min_vol_input * 1000)]
+    
+    if filter_trend_up and filter_trend_down:
+        st.error("❌ 請勿同時勾選「生命線向上」與「生命線向下」，這兩個條件是互斥的！")
+        df = df[0:0] 
+    elif filter_trend_up:
+        df = df[df['生命線趨勢'] == "⬆
