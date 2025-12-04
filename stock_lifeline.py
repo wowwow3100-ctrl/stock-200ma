@@ -9,7 +9,7 @@ import numpy as np
 import os
 
 # --- 1. 網頁設定 ---
-VER = "ver4.6_FullLog"
+VER = "ver4.7_SimpleLog"
 st.set_page_config(page_title=f"🍍 旺來-台股生命線({VER})", layout="wide")
 
 # --- 2. 核心功能區 ---
@@ -164,7 +164,7 @@ def run_strategy_backtest(stock_dict, progress_bar, use_trend_up, use_treasure, 
         return pd.DataFrame()
 
     df_results = pd.DataFrame(results)
-    df_results['觸發次數'] = df_results.groupby('StockID')['StockID'].transform('count')
+    # --- 【修改點】移除觸發次數的計算 ---
 
     numeric_cols = ['訊號價', '未來20日收盤', '一個月內漲幅(%)']
     for col in numeric_cols:
@@ -173,10 +173,10 @@ def run_strategy_backtest(stock_dict, progress_bar, use_trend_up, use_treasure, 
 
     def generate_log(row):
         rise_pct = f"{row['一個月內漲幅(%)']}%" if not pd.isna(row['一個月內漲幅(%)']) else "統計中"
+        # --- 【修改點】移除日誌中的觸發次數顯示 ---
         return (f"日期: {row['訊號日期']} | "
                 f"股票: {row['StockID']} | "
                 f"觸發價: {row['訊號價']} | "
-                f"累計觸發: {row['觸發次數']}次 | "
                 f"後續漲幅: {rise_pct}")
 
     df_results['紀錄日誌'] = df_results.apply(generate_log, axis=1)
@@ -379,10 +379,8 @@ with st.sidebar:
         st.caption(f"最後更新：{st.session_state['last_update']}")
     
     st.divider()
-    # --- 【修改點】移除「2.」 ---
     st.header("即時篩選器")
     
-    # --- 【修改點】動態滑桿與名詞定義 (Ver 4.5) ---
     bias_threshold = st.slider("乖離率範圍 (±%)", 0.5, 20.0, 5.0, step=0.1)
     
     if bias_threshold <= 5.0:
@@ -412,7 +410,6 @@ with st.sidebar:
         stock_dict = get_stock_list()
         bt_progress = st.progress(0, text="初始化回測...")
         
-        # --- 這裡會將你勾選的條件 (filter_trend_up 等) 傳入回測函數 ---
         bt_df = run_strategy_backtest(
             stock_dict, 
             bt_progress, 
@@ -425,9 +422,11 @@ with st.sidebar:
         bt_progress.empty()
         st.success("回測完成！已生成詳細報表。")
 
-    # --- 【修改點】補齊完整的歷史開發日誌 ---
     with st.expander("📅 系統開發日誌 (Changelog)"):
         st.markdown("""
+        ### Ver 4.7 (Simple Log)
+        * **UI**: 移除「觸發次數」的顯示與統計，保持報表簡潔。
+
         ### Ver 4.6 (Full Log)
         * **UI**: 介面文字優化，補齊所有開發歷史。
         
@@ -443,7 +442,7 @@ with st.sidebar:
 
         ### Ver 4.2 (Hybrid)
         * **Merge**: 結合第一版介面與第二版驗證核心 (20日漲幅)。
-        * **Stats**: 新增「觸發次數」統計與詳細日誌。
+        * **Stats**: (已移除) 新增「觸發次數」統計。
 
         ### Ver 3.11 (Simple Line Chart)
         * **Visual**: 圖表改版，使用純粹的「收盤價 vs 生命線」雙線圖。
@@ -482,7 +481,8 @@ if st.session_state['backtest_result'] is not None:
             col2.metric("20日後上漲機率", f"{win_rate}%")
             col3.metric("平均月漲幅", f"{avg_ret}%")
             
-            show_cols = ['訊號日期', 'StockID', '名稱', '訊號價', '觸發次數', '未來20日收盤', '一個月內漲幅(%)', '紀錄日誌']
+            # --- 【修改點】移除觸發次數 ---
+            show_cols = ['訊號日期', 'StockID', '名稱', '訊號價', '未來20日收盤', '一個月內漲幅(%)', '紀錄日誌']
             
             def color_ret(val):
                 if pd.isna(val): return ''
