@@ -9,7 +9,7 @@ import numpy as np
 import os
 
 # --- 1. 網頁設定 ---
-VER = "ver4.8_Optimizer"
+VER = "ver4.9_SmartMoney"
 st.set_page_config(page_title=f"🍍 旺來-台股生命線({VER})", layout="wide")
 
 # --- 2. 核心功能區 ---
@@ -51,12 +51,19 @@ def calculate_kd_values(df, n=9):
     except:
         return 50, 50
 
-# --- 策略最佳化擂台函數 (New!) ---
+def calculate_obv(df):
+    """計算 OBV 能量潮 (大戶籌碼代理指標)"""
+    try:
+        # OBV = 累積 (如果收盤漲 sign=1 * Vol, 跌 sign=-1 * Vol)
+        # 填補 0 避免計算錯誤
+        obv = (np.sign(df['Close'].diff()) * df['Volume']).fillna(0).cumsum()
+        return obv
+    except:
+        return pd.Series(0, index=df.index)
+
+# --- 策略最佳化擂台函數 ---
 def run_optimization_tournament(stock_dict, progress_bar):
-    """
-    執行策略擂台：一次性找出所有訊號，並統計不同條件組合的勝率
-    """
-    raw_signals = [] # 儲存所有原始訊號
+    raw_signals = [] 
     all_tickers = list(stock_dict.keys())
     BATCH_SIZE = 50 
     total_batches = (len(all_tickers) // BATCH_SIZE) + 1
@@ -64,17 +71,13 @@ def run_optimization_tournament(stock_dict, progress_bar):
     for i, batch_idx in enumerate(range(0, len(all_tickers), BATCH_SIZE)):
         batch = all_tickers[batch_idx : batch_idx + BATCH_SIZE]
         try:
-            # 下載 2 年資料以進行完整回測
             data = yf.download(batch, period="2y", interval="1d", progress=False, auto_adjust=False)
             
             # 處理 MultiIndex
             if isinstance(data.columns, pd.MultiIndex):
-                # 這裡比較複雜，因為我們需要保留 ticker 資訊
-                # yfinance 新版下載多個 ticker 時，columns 是 (PriceType, Ticker)
                 pass 
             
             if not data.empty:
-                # 提取各項數據
                 try:
                     df_c = data['Close']
                     df_v = data['Volume']
@@ -83,7 +86,6 @@ def run_optimization_tournament(stock_dict, progress_bar):
                 except KeyError:
                     continue
                 
-                # 單一股票的 Series 轉 DataFrame 處理
                 if isinstance(df_c, pd.Series):
                     ticker = batch[0]
                     df_c = df_c.to_frame(name=ticker)
@@ -93,7 +95,12 @@ def run_optimization_tournament(stock_dict, progress_bar):
 
                 ma200_df = df_c.rolling(window=200).mean()
                 
-                # 設定回測區間：過去 250 天 ~ 過去 20 天 (預留驗證期)
+                # 計算全體 OBV (稍微複雜因為是 DataFrame)
+                # 這裡針對每一欄位跑迴圈計算比較穩當
+                obv_df = pd.DataFrame(index=df_c.index, columns=df_c.columns)
+                for col in df_c.columns:
+                    obv_df[col] = calculate_obv(pd.DataFrame({'Close': df_c[col], 'Volume': df_v[col]}))
+
                 scan_window_idx = df_c.index[-250:-20] 
                 
                 for ticker in df_c.columns:
@@ -102,8 +109,8 @@ def run_optimization_tournament(stock_dict, progress_bar):
                         v_series = df_v[ticker]
                         l_series = df_l[ticker]
                         ma_series = ma200_df[ticker]
+                        obv_series = obv_df[ticker]
                         
-                        # 快速檢查數據品質
                         if c_series.isna().sum() > 100 or ma_series.isna().all(): continue
 
                         for date in scan_window_idx:
@@ -112,7 +119,6 @@ def run_optimization_tournament(stock_dict, progress_bar):
                             idx = c_series.index.get_loc(date)
                             if idx < 20: continue 
 
-                            # 取得當日數據 (強制轉型避免錯誤)
                             close_p = float(c_series.iloc[idx])
                             low_p = float(l_series.iloc[idx])
                             vol = float(v_series.iloc[idx])
@@ -122,44 +128,42 @@ def run_optimization_tournament(stock_dict, progress_bar):
                             
                             if ma_val == 0 or prev_vol == 0: continue
 
-                            # --- 1. 基礎篩選：是否在生命線附近 (Entry Condition) ---
-                            # 條件：收盤在線上，最低價曾回測到 1.03 倍以內 (或者 0.98~1.03 區間)
-                            # 這裡採用較寬鬆的定義：收盤價站上，且 Low 接近 MA
+                            # --- 1. 基礎訊號 ---
                             cond_near = (low_p <= ma_val * 1.03) and (low_p >= ma_val * 0.90)
                             cond_up = (close_p > ma_val)
-                            
-                            # 為了抓出「浴火重生」，我們需要更細的邏輯，這裡先抓「基礎訊號」
                             is_basic_signal = cond_near and cond_up
                             
-                            # --- 2. 標記特徵 (Feature Tagging) ---
-                            tag_trend_up = (ma_val > ma_val_20ago) # 生命線向上
-                            tag_vol_double = (vol > prev_vol * 1.5) # 爆量
+                            # --- 2. 特徵標記 ---
+                            tag_trend_up = (ma_val > ma_val_20ago)
+                            tag_vol_double = (vol > prev_vol * 1.5)
                             
-                            # 浴火重生邏輯
+                            # 籌碼標記 (Smart Money)：前一週 (5天前) OBV 是否低於現在 (代表這一週在吸籌)
+                            obv_now = obv_series.iloc[idx]
+                            obv_week_ago = obv_series.iloc[idx-5]
+                            tag_obv_in = obv_now > obv_week_ago
+
+                            # 浴火重生
                             tag_treasure = False
                             start_idx = idx - 7
                             if start_idx >= 0:
                                 recent_c = c_series.iloc[start_idx : idx+1]
                                 recent_ma = ma_series.iloc[start_idx : idx+1]
-                                # 今天站上，且過去7天內曾跌破
                                 cond_today_up = recent_c.iloc[-1] > recent_ma.iloc[-1]
                                 cond_past_down = (recent_c.iloc[:-1] < recent_ma.iloc[:-1]).any()
                                 if cond_today_up and cond_past_down:
                                     tag_treasure = True
 
-                            # 如果連基礎訊號都不是，且不是浴火重生，就跳過
                             if not is_basic_signal and not tag_treasure:
                                 continue
                                 
-                            # --- 3. 計算結果 (Outcome) ---
+                            # --- 3. 結果驗證 ---
                             if idx + 20 < len(c_series):
                                 future_close = float(c_series.iloc[idx + 20])
                                 profit_pct = (future_close - close_p) / close_p * 100
-                                is_win = profit_pct > 0 # 勝率定義：20天後是否賺錢
+                                is_win = profit_pct > 0 
                             else:
-                                continue # 資料不足以驗證
+                                continue 
 
-                            # --- 4. 記錄每一筆交易 ---
                             raw_signals.append({
                                 'Ticker': ticker,
                                 'Date': date,
@@ -168,6 +172,7 @@ def run_optimization_tournament(stock_dict, progress_bar):
                                 'Tag_Trend_Up': tag_trend_up,
                                 'Tag_Vol_Double': tag_vol_double,
                                 'Tag_Treasure': tag_treasure,
+                                'Tag_OBV_In': tag_obv_in, # 新增
                                 'Is_Basic_Near': is_basic_signal
                             })
 
@@ -177,13 +182,12 @@ def run_optimization_tournament(stock_dict, progress_bar):
             pass
         
         progress = (i + 1) / total_batches
-        progress_bar.progress(progress, text=f"正在進行全策略掃描...({int(progress*100)}%)")
+        progress_bar.progress(progress, text=f"全策略掃描中...({int(progress*100)}%)")
         
     return pd.DataFrame(raw_signals)
 
-# --- 原有的回測函數 (保留用於單一策略深究) ---
-def run_strategy_backtest(stock_dict, progress_bar, use_trend_up, use_treasure, use_vol):
-    # (此函數維持不變，僅做資料清理修復)
+# --- 單一回測函數 (維持原樣，僅加入參數接收) ---
+def run_strategy_backtest(stock_dict, progress_bar, use_trend_up, use_treasure, use_vol, use_obv):
     results = []
     all_tickers = list(stock_dict.keys())
     BATCH_SIZE = 50 
@@ -194,7 +198,6 @@ def run_strategy_backtest(stock_dict, progress_bar, use_trend_up, use_treasure, 
         try:
             data = yf.download(batch, period="2y", interval="1d", progress=False, auto_adjust=False)
             if isinstance(data.columns, pd.MultiIndex):
-                # 這裡無法簡單 flatten，需依賴 key 存取
                 pass
 
             if not data.empty:
@@ -213,6 +216,12 @@ def run_strategy_backtest(stock_dict, progress_bar, use_trend_up, use_treasure, 
                     df_h = df_h.to_frame(name=batch[0])
 
                 ma200_df = df_c.rolling(window=200).mean()
+                
+                # 計算 OBV
+                obv_df = pd.DataFrame(index=df_c.index, columns=df_c.columns)
+                for col in df_c.columns:
+                    obv_df[col] = calculate_obv(pd.DataFrame({'Close': df_c[col], 'Volume': df_v[col]}))
+
                 scan_window = df_c.index[-250:-20] 
                 
                 for ticker in df_c.columns:
@@ -221,6 +230,7 @@ def run_strategy_backtest(stock_dict, progress_bar, use_trend_up, use_treasure, 
                         v_series = df_v[ticker]
                         l_series = df_l[ticker]
                         ma_series = ma200_df[ticker]
+                        obv_series = obv_df[ticker]
                         
                         stock_name = stock_dict.get(ticker, {}).get('name', ticker)
                         stock_code = stock_dict.get(ticker, {}).get('code', ticker.split('.')[0])
@@ -238,13 +248,19 @@ def run_strategy_backtest(stock_dict, progress_bar, use_trend_up, use_treasure, 
                             ma_val = float(ma_series.iloc[idx])
                             ma_val_20ago = float(ma_series.iloc[idx-20])
                             
+                            # OBV Check
+                            obv_now = obv_series.iloc[idx]
+                            obv_week_ago = obv_series.iloc[idx-5]
+                            is_obv_up = obv_now > obv_week_ago
+
                             if ma_val == 0 or prev_vol == 0: continue
 
                             is_match = False
                             
-                            # 邏輯判斷
+                            # 過濾條件
                             if use_trend_up and (ma_val <= ma_val_20ago): continue
                             if use_vol and (vol <= prev_vol * 1.5): continue
+                            if use_obv and not is_obv_up: continue # OBV 濾網
 
                             if use_treasure:
                                 start_idx = idx - 7
@@ -325,10 +341,7 @@ def fetch_all_data(stock_dict, progress_bar, status_text):
         batch = all_tickers[batch_idx : batch_idx + BATCH_SIZE]
         try:
             data = yf.download(batch, period="1y", interval="1d", progress=False, auto_adjust=False)
-            
-            # --- 關鍵修正：處理 yfinance MultiIndex ---
             if isinstance(data.columns, pd.MultiIndex):
-                # 我們需要在迴圈內處理，不能直接 flatten
                 pass
             
             if not data.empty:
@@ -348,7 +361,11 @@ def fetch_all_data(stock_dict, progress_bar, status_text):
 
                 ma200_df = df_c.rolling(window=200).mean()
                 
-                # 取最後一筆資料
+                # 計算 OBV (Real-time)
+                obv_df = pd.DataFrame(index=df_c.index, columns=df_c.columns)
+                for col in df_c.columns:
+                    obv_df[col] = calculate_obv(pd.DataFrame({'Close': df_c[col], 'Volume': df_v[col]}))
+                
                 last_price_series = df_c.iloc[-1]
                 last_ma200_series = ma200_df.iloc[-1]
                 prev_ma200_series = ma200_df.iloc[-21] 
@@ -361,12 +378,17 @@ def fetch_all_data(stock_dict, progress_bar, status_text):
 
                 for ticker in df_c.columns:
                     try:
-                        # 安全獲取單一數值
                         price = float(last_price_series[ticker])
                         ma200 = float(last_ma200_series[ticker])
                         prev_ma200 = float(prev_ma200_series[ticker])
                         vol = float(last_vol_series[ticker])
                         prev_vol = float(prev_vol_series[ticker])
+                        
+                        # OBV Check
+                        obv_series = obv_df[ticker]
+                        obv_now = obv_series.iloc[-1]
+                        obv_week_ago = obv_series.iloc[-6] # 比較 5 天前
+                        is_obv_in = obv_now > obv_week_ago
                         
                         if pd.isna(price) or pd.isna(ma200) or ma200 == 0: continue
 
@@ -408,7 +430,8 @@ def fetch_all_data(stock_dict, progress_bar, status_text):
                             'K值': round(float(k_val), 2),
                             'D值': round(float(d_val), 2),
                             '位置': "🟢生命線上" if price >= ma200 else "🔴生命線下",
-                            '浴火重生': is_treasure
+                            '浴火重生': is_treasure,
+                            'OBV趨勢': "🔥吸籌" if is_obv_in else "☁️一般"
                         })
                     except Exception as e: 
                         continue
@@ -423,7 +446,6 @@ def fetch_all_data(stock_dict, progress_bar, status_text):
 def plot_stock_chart(ticker, name):
     try:
         df = yf.download(ticker, period="1y", interval="1d", progress=False, auto_adjust=False)
-        # 處理 MultiIndex
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
             
@@ -434,28 +456,29 @@ def plot_stock_chart(ticker, name):
             return
 
         df['200MA'] = df['Close'].rolling(window=200).mean()
+        # 繪圖時也順便算一下 OBV
+        df['OBV'] = (np.sign(df['Close'].diff()) * df['Volume']).fillna(0).cumsum()
         
         plot_df = df.tail(120).copy()
         plot_df['DateStr'] = plot_df.index.strftime('%Y-%m-%d')
 
         fig = go.Figure()
         
+        # 股價與MA (主圖)
         fig.add_trace(go.Scatter(
-            x=plot_df['DateStr'], 
-            y=plot_df['Close'], 
-            mode='lines',
-            name='收盤價',
+            x=plot_df['DateStr'], y=plot_df['Close'], 
+            mode='lines', name='收盤價',
             line=dict(color='#00CC96', width=2.5) 
         ))
-        
         fig.add_trace(go.Scatter(
-            x=plot_df['DateStr'], 
-            y=plot_df['200MA'], 
-            mode='lines',
-            name='生命線',
+            x=plot_df['DateStr'], y=plot_df['200MA'], 
+            mode='lines', name='生命線',
             line=dict(color='#FFA15A', width=3) 
         ))
-
+        
+        # 為了不讓圖表太亂，這裡只顯示股價
+        # OBV 通常需要副圖，Streamlit 簡單版先不畫副圖以免手機版跑版
+        
         fig.update_layout(
             title=f"📊 {name} ({ticker}) 股價 vs 生命線趨勢", 
             yaxis_title='價格', 
@@ -465,289 +488,15 @@ def plot_stock_chart(ticker, name):
             legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
         )
         st.plotly_chart(fig, use_container_width=True)
+        
+        # 額外顯示 OBV 狀態
+        obv_trend = "📈 增加中 (有人在買)" if plot_df['OBV'].iloc[-1] > plot_df['OBV'].iloc[-6] else "📉 持平或減少"
+        st.info(f"💡 籌碼雷達 (OBV)：近一週 {obv_trend}")
+        
     except Exception as e: st.error(f"繪圖失敗: {e}")
 
 # --- 3. 介面顯示區 ---
 st.title(f"🍍 {VER} 旺來-台股生命線")
 st.markdown("---")
 
-if 'master_df' not in st.session_state:
-    st.session_state['master_df'] = None
-if 'last_update' not in st.session_state:
-    st.session_state['last_update'] = None
-if 'backtest_result' not in st.session_state:
-    st.session_state['backtest_result'] = None
-if 'optimizer_result' not in st.session_state:
-    st.session_state['optimizer_result'] = None
-
-with st.sidebar:
-    st.header("資料庫管理")
-    
-    if st.button("🚨 強制重置系統"):
-        st.cache_data.clear()
-        st.session_state.clear()
-        st.success("系統已重置！請重新點擊更新股價。")
-        st.rerun()
-
-    if st.button("🔄 更新股價資料 (開市請按我)", type="primary"):
-        stock_dict = get_stock_list()
-        
-        if not stock_dict:
-            st.error("無法取得股票清單，請稍後再試或按上方重置按鈕。")
-        else:
-            placeholder_emoji = st.empty() 
-            with placeholder_emoji:
-                st.markdown("""
-                    <div style="text-align: center; font-size: 40px; animation: blink 1s infinite;">
-                        🎁💰✨
-                    </div>
-                    <style>
-                    @keyframes blink { 0% { opacity: 1; } 50% { opacity: 0.5; } 100% { opacity: 1; } }
-                    </style>
-                    <div style="text-align: center;">正在開鎖寶箱...</div>
-                """, unsafe_allow_html=True)
-            
-            status_text = st.empty()
-            progress_bar = st.progress(0, text="準備下載...")
-            
-            df = fetch_all_data(stock_dict, progress_bar, status_text)
-            
-            placeholder_emoji.empty()
-            
-            st.session_state['master_df'] = df
-            st.session_state['last_update'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            progress_bar.empty()
-            st.success(f"更新完成！共 {len(df)} 檔資料")
-        
-    if st.session_state['last_update']:
-        st.caption(f"最後更新：{st.session_state['last_update']}")
-    
-    st.divider()
-    st.header("功能選擇")
-    
-    bias_threshold = st.slider("乖離率範圍 (±%)", 0.5, 20.0, 5.0, step=0.1)
-    if bias_threshold <= 5.0:
-        st.caption("🛡️ 防守型")
-    else:
-        st.caption("⚔️ 攻擊型")
-
-    min_vol_input = st.number_input("最低成交量 (張)", value=1000, step=100)
-    
-    st.subheader("篩選濾網 (用於即時篩選 & 單一回測)")
-    
-    filter_trend_up = st.checkbox("📈 生命線向上 (多方)", value=False)
-    filter_trend_down = st.checkbox("📉 生命線向下 (空方)", value=False)
-    filter_treasure = st.checkbox("🔥 浴火重生 (假跌破)", value=False)
-    filter_kd = st.checkbox("KD 黃金交叉", value=False)
-    filter_vol_double = st.checkbox("出量 ( > 昨日x1.5)", value=False)
-    
-    st.divider()
-    
-    # --- 新增功能：策略擂台 ---
-    st.subheader("策略實驗室")
-    if st.button("🏆 執行策略擂台 (尋找最強組合)"):
-        st.info("正在進行全軍演練，將比較不同策略組合的勝率... (約需 2-3 分鐘)")
-        stock_dict = get_stock_list()
-        opt_progress = st.progress(0, text="初始化擂台...")
-        
-        opt_df = run_optimization_tournament(stock_dict, opt_progress)
-        st.session_state['optimizer_result'] = opt_df
-        opt_progress.empty()
-        st.success("擂台賽結束！請看右側報告。")
-
-    if st.button("🧪 單一策略回測 (含20日後驗證)"):
-        st.info("執行指定條件回測... ⏳")
-        stock_dict = get_stock_list()
-        bt_progress = st.progress(0, text="初始化回測...")
-        
-        bt_df = run_strategy_backtest(
-            stock_dict, 
-            bt_progress, 
-            use_trend_up=filter_trend_up, 
-            use_treasure=filter_treasure, 
-            use_vol=filter_vol_double
-        )
-        
-        st.session_state['backtest_result'] = bt_df
-        bt_progress.empty()
-        st.success("回測完成！")
-
-    with st.expander("📅 系統開發日誌"):
-        st.markdown("""
-        ### Ver 4.8 (Optimizer)
-        * **New**: 新增「策略擂台賽」，自動計算並比較 5 種策略組合的勝率與報酬，不再需要盲測。
-        """)
-
-# --- 主畫面：顯示區 ---
-
-# 1. 優先顯示策略擂台結果
-if st.session_state['optimizer_result'] is not None:
-    df_opt = st.session_state['optimizer_result']
-    st.subheader("🏆 策略擂台賽：哪種條件最會漲？")
-    st.caption("統計過去 250 個交易日，持有 20 天後的表現。")
-    
-    if not df_opt.empty:
-        # 定義我們要比較的策略組合
-        strategies = {
-            "1. 裸測 (只要接近生命線就買)": df_opt[df_opt['Is_Basic_Near'] == True],
-            "2. 順勢 (生命線趨勢向上)": df_opt[(df_opt['Is_Basic_Near'] == True) & (df_opt['Tag_Trend_Up'] == True)],
-            "3. 爆量 (接近生命線 + 爆量)": df_opt[(df_opt['Is_Basic_Near'] == True) & (df_opt['Tag_Vol_Double'] == True)],
-            "4. 黃金組合 (順勢 + 爆量)": df_opt[(df_opt['Is_Basic_Near'] == True) & (df_opt['Tag_Trend_Up'] == True) & (df_opt['Tag_Vol_Double'] == True)],
-            "5. 浴火重生 (假跌破拉回)": df_opt[df_opt['Tag_Treasure'] == True],
-        }
-        
-        summary_list = []
-        for name, sub_df in strategies.items():
-            total = len(sub_df)
-            if total > 0:
-                wins = len(sub_df[sub_df['Is_Win'] == True])
-                win_rate = (wins / total) * 100
-                avg_profit = sub_df['Profit_Pct'].mean()
-                summary_list.append({
-                    "策略名稱": name,
-                    "交易次數": total,
-                    "勝率 (%)": win_rate,
-                    "平均報酬 (%)": avg_profit
-                })
-            else:
-                summary_list.append({
-                    "策略名稱": name,
-                    "交易次數": 0,
-                    "勝率 (%)": 0,
-                    "平均報酬 (%)": 0
-                })
-        
-        sum_df = pd.DataFrame(summary_list)
-        sum_df = sum_df.sort_values(by="勝率 (%)", ascending=False)
-        
-        # 格式化顯示
-        st.dataframe(
-            sum_df.style.background_gradient(subset=['勝率 (%)', '平均報酬 (%)'], cmap='RdYlGn'),
-            use_container_width=True
-        )
-        
-        best_strat = sum_df.iloc[0]
-        st.success(f"🎉 目前冠軍策略是：**{best_strat['策略名稱']}** (勝率 {best_strat['勝率 (%)']:.1f}%)")
-        st.markdown("---")
-
-# 2. 顯示單一回測報告 (原本的功能)
-if st.session_state['backtest_result'] is not None:
-    bt_df = st.session_state['backtest_result']
-    
-    strategy_name = "基礎策略"
-    if filter_treasure: strategy_name = "浴火重生(假跌破)"
-    elif filter_trend_up: strategy_name = "趨勢向上 + 支撐"
-    
-    st.subheader(f"🧪 單一策略詳情：{strategy_name}")
-    
-    if len(bt_df) > 0:
-        win_count = len(bt_df[bt_df['結果'].str.contains("Win")])
-        valid_df = bt_df.dropna(subset=['一個月內漲幅(%)'])
-        total_count = len(valid_df)
-        
-        win_rate = int((win_count / total_count) * 100) if total_count > 0 else 0
-        avg_ret = round(valid_df['一個月內漲幅(%)'].mean(), 2) if total_count > 0 else 0
-        
-        col1, col2, col3 = st.columns(3)
-        col1.metric("有效交易次數", total_count)
-        col2.metric("20日後上漲機率", f"{win_rate}%")
-        col3.metric("平均月漲幅", f"{avg_ret}%")
-        
-        show_cols = ['訊號日期', 'StockID', '名稱', '訊號價', '未來20日收盤', '一個月內漲幅(%)']
-        def color_ret(val):
-            if pd.isna(val): return ''
-            color = 'red' if val > 0 else 'green'
-            return f'color: {color}'
-            
-        st.dataframe(
-            bt_df[show_cols].style.map(color_ret, subset=['一個月內漲幅(%)']), 
-            use_container_width=True
-        )
-    else:
-        st.warning("在此回測期間內，沒有股票符合您目前勾選的條件組合。")
-    st.markdown("---")
-
-# 3. 日常篩選 (原本的功能)
-if st.session_state['master_df'] is not None:
-    df = st.session_state['master_df'].copy()
-    
-    if '生命線' not in df.columns:
-        st.error("⚠️ 資料結構已更新！請點擊左側紅色的 **「🔄 更新股價資料」** 按鈕。")
-        st.stop()
-
-    df = df[df['abs_bias'] <= bias_threshold]
-    df = df[df['成交量'] >= (min_vol_input * 1000)]
-    
-    if filter_trend_up and filter_trend_down:
-        st.error("❌ 請勿同時勾選「生命線向上」與「生命線向下」，這兩個條件是互斥的！")
-        df = df[0:0] 
-    elif filter_trend_up:
-        df = df[df['生命線趨勢'] == "⬆️向上"]
-    elif filter_trend_down:
-        df = df[df['生命線趨勢'] == "⬇️向下"]
-
-    if filter_treasure: df = df[df['浴火重生'] == True]
-    if filter_kd: df = df[df['K值'] > df['D值']]
-    
-    if filter_vol_double: 
-        df = df[df['成交量'] > (df['昨日成交量'] * 1.5)]
-        
-    if len(df) == 0:
-        st.warning(f"⚠️ 找不到符合條件的股票！")
-    else:
-        st.markdown(f"""
-        <div style="background-color: #f0f2f6; padding: 15px; border-radius: 10px; text-align: center; border: 2px solid #ff4b4b;">
-            <h2 style="color: #333; margin:0;">🔍 根據目前條件，共篩選出 <span style="color: #ff4b4b; font-size: 1.5em;">{len(df)}</span> 檔股票</h2>
-        </div>
-        <br>
-        """, unsafe_allow_html=True)
-        
-        df['成交量(張)'] = (df['成交量'] / 1000).astype(int)
-        df['KD值'] = df.apply(lambda x: f"K:{int(x['K值'])} D:{int(x['D值'])}", axis=1)
-        df['選股標籤'] = df['代號'] + " " + df['名稱']
-        
-        display_cols = ['代號', '名稱', '收盤價', '生命線', '生命線趨勢', '乖離率(%)', '位置', 'KD值', '成交量(張)']
-        if filter_treasure:
-             df = df.sort_values(by='成交量', ascending=False)
-        else:
-             df = df.sort_values(by='abs_bias')
-        
-        tab1, tab2 = st.tabs(["📋 篩選結果列表", "📊 日趨勢圖"])
-        
-        with tab1:
-            def highlight_row(row):
-                if row['位置'] == "🟢生命線上":
-                    return ['background-color: #e6fffa; color: black'] * len(row)
-                else:
-                    return ['background-color: #fff0f0; color: black'] * len(row)
-
-            st.dataframe(
-                df[display_cols].style.apply(highlight_row, axis=1),
-                use_container_width=True,
-                hide_index=True
-            )
-
-        with tab2:
-            st.markdown("### 🔍 個股近半年趨勢圖")
-            if len(df) > 0:
-                selected_stock_label = st.selectbox("請選擇一檔股票：", df['選股標籤'].tolist())
-                selected_row = df[df['選股標籤'] == selected_stock_label].iloc[0]
-                target_ticker = selected_row['完整代號']
-                target_name = selected_row['名稱']
-                
-                plot_stock_chart(target_ticker, target_name)
-                
-                col1, col2, col3 = st.columns(3)
-                col1.metric("目前股價", selected_row['收盤價'])
-                col2.metric("生命線", selected_row['生命線'], delta=f"{selected_row['乖離率(%)']}%")
-                col3.metric("KD指標", selected_row['KD值'])
-
-else:
-    st.warning("👈 請先點擊左側 sidebar 的 **「🔄 更新股價資料」** 按鈕開始挖寶！")
-    
-    col1, col2, col3 = st.columns([1, 2, 1])
-    with col2:
-        if os.path.exists("welcome.jpg"):
-            st.image("welcome.jpg", width=180)
-        else:
-            st.info("💡 歡迎使用旺來-台股生命線系統！")
+if 'master_df' not in st.session
