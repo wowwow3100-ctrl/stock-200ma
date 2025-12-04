@@ -9,7 +9,7 @@ import requests
 import os
 
 # --- 1. 網頁設定 ---
-VER = "ver3.13 (Royal Crown)"
+VER = "ver3.14 (Chart Fix)"
 st.set_page_config(page_title=f"🍍 旺來-台股生命線({VER})", layout="wide")
 
 # --- 2. 核心功能區 ---
@@ -51,14 +51,13 @@ def calculate_kd_values(df, n=9):
     except:
         return 50, 50
 
-# --- 策略回測核心函數 (包含皇冠特選邏輯 + 成交量修復) ---
+# --- 策略回測核心函數 ---
 def run_strategy_backtest(stock_dict, progress_bar, use_trend_up, use_treasure, use_vol, use_royal, min_vol_threshold):
     results = []
     all_tickers = list(stock_dict.keys())
     BATCH_SIZE = 50 
     total_batches = (len(all_tickers) // BATCH_SIZE) + 1
     
-    # 一般策略觀察 10 天，皇冠策略觀察 20 天
     OBSERVE_DAYS = 20 if use_royal else 10
     
     for i, batch_idx in enumerate(range(0, len(all_tickers), BATCH_SIZE)):
@@ -80,13 +79,11 @@ def run_strategy_backtest(stock_dict, progress_bar, use_trend_up, use_treasure, 
                     df_l = df_l.to_frame(name=batch[0])
                     df_h = df_h.to_frame(name=batch[0])
 
-                # 計算均線
                 ma200_df = df_c.rolling(window=200).mean()
                 if use_royal:
                     ma20_df = df_c.rolling(window=20).mean()
                     ma60_df = df_c.rolling(window=60).mean()
                 
-                # 掃描範圍直到最新
                 scan_window = df_c.index[-90:] 
                 
                 for ticker in df_c.columns:
@@ -109,32 +106,24 @@ def run_strategy_backtest(stock_dict, progress_bar, use_trend_up, use_treasure, 
                             if date not in c_series.index: continue
 
                             idx = c_series.index.get_loc(date)
-                            if idx < 200: continue # 皇冠需要足夠資料計算 MA200
+                            if idx < 200: continue 
 
                             close_p = c_series.iloc[idx]
                             vol = v_series.iloc[idx]
                             prev_vol = v_series.iloc[idx-1]
                             ma200_val = ma200_series.iloc[idx]
                             
-                            # --- 修正點：嚴格執行最低成交量過濾 (單位：股，輸入為張) ---
                             if vol < (min_vol_threshold * 1000): continue
                             if ma200_val == 0 or prev_vol == 0: continue
 
                             is_match = False
                             
-                            # --- 分流：皇冠特選 vs 一般策略 ---
                             if use_royal:
-                                # 皇冠條件：股價 > 20MA > 60MA > 200MA (多頭排列)
                                 ma20_val = ma20_series.iloc[idx]
                                 ma60_val = ma60_series.iloc[idx]
-                                
-                                # 必須有多頭排列
                                 if (close_p > ma20_val) and (ma20_val > ma60_val) and (ma60_val > ma200_val):
-                                    # 這裡可以額外加一個「靠近 20MA 進場」的濾網，或者只要排列正確就進
-                                    # 目前依需求：只要多頭排列即觸發
                                     is_match = True
                             else:
-                                # 一般策略
                                 low_p = l_series.iloc[idx]
                                 ma_val_20ago = ma200_series.iloc[idx-20]
                                 
@@ -160,23 +149,19 @@ def run_strategy_backtest(stock_dict, progress_bar, use_trend_up, use_treasure, 
                                 month_str = date.strftime('%m月')
                                 days_after_signal = total_len - 1 - idx
                                 
-                                # --- 結果判定邏輯 ---
                                 final_profit_pct = 0.0
                                 result_status = "觀察中"
                                 is_watching = False
 
-                                if days_after_signal < 1: # 今天剛觸發，完全沒未來資料
+                                if days_after_signal < 1: 
                                     is_watching = True
                                     final_profit_pct = 0.0
                                     
                                 elif use_royal:
-                                    # --- 皇冠策略：動態回測 (逐日檢查) ---
-                                    # 預設先設為觀察中，除非中途觸發出場
                                     is_watching = True 
                                     current_price = c_series.iloc[-1]
                                     final_profit_pct = (current_price - close_p) / close_p * 100
                                     
-                                    # 檢查接下來的每一天 (最多 20 天)
                                     check_days = min(days_after_signal, OBSERVE_DAYS)
                                     
                                     for d in range(1, check_days + 1):
@@ -185,35 +170,29 @@ def run_strategy_backtest(stock_dict, progress_bar, use_trend_up, use_treasure, 
                                         day_close = c_series.iloc[day_idx]
                                         day_ma200 = ma200_series.iloc[day_idx]
                                         
-                                        # 1. 停利檢查 (+10%)
                                         if day_high >= close_p * 1.10:
                                             final_profit_pct = 10.0
                                             result_status = "Win (止盈出場) 👑"
-                                            is_watching = False # 已經結算
+                                            is_watching = False 
                                             break
                                         
-                                        # 2. 停損檢查 (收盤跌破 200MA)
                                         if day_close < day_ma200:
                                             final_profit_pct = (day_close - close_p) / close_p * 100
                                             result_status = "Loss (破線停損) 🛑"
-                                            is_watching = False # 已經結算
+                                            is_watching = False 
                                             break
                                     
-                                    # 如果跑完了迴圈還沒出場
                                     if is_watching:
                                         if days_after_signal >= OBSERVE_DAYS:
-                                            # 時間到期，強制結算
                                             end_close = c_series.iloc[idx + OBSERVE_DAYS]
                                             final_profit_pct = (end_close - close_p) / close_p * 100
                                             if final_profit_pct > 0: result_status = "Win (期滿獲利)"
                                             else: result_status = "Loss (期滿虧損)"
                                             is_watching = False
                                         else:
-                                            # 時間還沒到，也沒觸發停損停利 -> 真正的「觀察中」
                                             result_status = "觀察中"
 
                                 else:
-                                    # --- 一般策略：看區間最大值 ---
                                     if days_after_signal < OBSERVE_DAYS:
                                         current_price = c_series.iloc[-1]
                                         final_profit_pct = (current_price - close_p) / close_p * 100
@@ -274,7 +253,6 @@ def fetch_all_data(stock_dict, progress_bar, status_text):
                     df_l = df_l.to_frame(name=batch[0])
                     df_v = df_v.to_frame(name=batch[0])
 
-                # 計算需要的均線 (含皇冠特選需要的 20/60MA)
                 ma200_df = df_c.rolling(window=200).mean()
                 ma20_df = df_c.rolling(window=20).mean()
                 ma60_df = df_c.rolling(window=60).mean()
@@ -306,7 +284,6 @@ def fetch_all_data(stock_dict, progress_bar, status_text):
 
                         ma_trend = "⬆️向上" if ma200 >= prev_ma200 else "⬇️向下"
 
-                        # 浴火重生判斷
                         is_treasure = False
                         my_recent_c = recent_close_df[ticker]
                         my_recent_ma = recent_ma200_df[ticker]
@@ -317,7 +294,6 @@ def fetch_all_data(stock_dict, progress_bar, status_text):
                             cond_past_down = (past_c < past_ma).any()
                             if cond_today_up and cond_past_down: is_treasure = True
 
-                        # 皇冠特選判斷 (多頭排列)
                         is_royal = False
                         if (price > ma20) and (ma20 > ma60) and (ma60 > ma200):
                             is_royal = True
@@ -362,6 +338,11 @@ def fetch_all_data(stock_dict, progress_bar, status_text):
 def plot_stock_chart(ticker, name):
     try:
         df = yf.download(ticker, period="1y", interval="1d", progress=False, auto_adjust=False)
+        
+        # --- 重要修正: 處理新版 yfinance 下載單一股票時可能出現的 MultiIndex 問題 ---
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
+            
         if df.index.tz is not None: df.index = df.index.tz_localize(None)
         df = df[df['Volume'] > 0].dropna()
         if df.empty:
@@ -450,15 +431,14 @@ with st.sidebar:
     
     st.subheader("策略選擇")
     
-    # 將策略選項互斥化，避免邏輯衝突
+    # 策略改名
     strategy_mode = st.radio(
         "選擇篩選策略：",
-        ("基礎生命線 (反彈/支撐)", "🔥 浴火重生 (假跌破)", "👑 皇冠特選 (多頭排列)")
+        ("🛡️ 守護生命線 (反彈/支撐)", "🔥 浴火重生 (假跌破)", "👑 皇冠特選 (多頭排列)")
     )
 
     st.caption("細部條件：")
     
-    # 根據不同策略顯示不同選項
     filter_trend_up = False
     filter_trend_down = False
     filter_kd = False
@@ -466,7 +446,7 @@ with st.sidebar:
     filter_royal = False
     filter_treasure = False
 
-    if strategy_mode == "基礎生命線 (反彈/支撐)":
+    if strategy_mode == "🛡️ 守護生命線 (反彈/支撐)":
         col1, col2 = st.columns(2)
         with col1: filter_trend_up = st.checkbox("生命線向上", value=False)
         with col2: filter_trend_down = st.checkbox("生命線向下", value=False)
@@ -491,12 +471,12 @@ with st.sidebar:
     st.divider()
     
     st.caption("⚠️ 回測將使用上方設定的「最低成交量」進行過濾。")
-    if st.button("🧪 策略回測 (近3個月表現)"):
+    # 按鈕文字修正
+    if st.button("🧪 策略回測"):
         st.info("阿吉正在調閱過去2年的歷史檔案，進行深度驗證... (請稍候) ⏳")
         stock_dict = get_stock_list()
         bt_progress = st.progress(0, text="初始化回測...")
         
-        # 根據 radio button 設定參數
         use_treasure_param = True if strategy_mode == "🔥 浴火重生 (假跌破)" else False
         use_royal_param = True if strategy_mode == "👑 皇冠特選 (多頭排列)" else False
         
@@ -507,7 +487,7 @@ with st.sidebar:
             use_treasure=use_treasure_param, 
             use_vol=filter_vol_double,
             use_royal=use_royal_param,
-            min_vol_threshold=min_vol_input # 傳入成交量過濾
+            min_vol_threshold=min_vol_input 
         )
         
         st.session_state['backtest_result'] = bt_df
@@ -516,10 +496,9 @@ with st.sidebar:
 
     with st.expander("📅 系統開發日誌"):
         st.markdown("""
-        ### Ver 3.13 (Royal Crown)
-        * **New**: 新增「👑 皇冠特選」策略，專找多頭排列強勢股。
-        * **Logic**: 皇冠策略採用動態出場機制 (觸及+10%停利，收盤破200MA停損)。
-        * **Fix**: 修復回測時未濾除低成交量個股的問題 (現在會依照設定的最低張數過濾)。
+        ### Ver 3.14 (Chart Fix)
+        * **Fix**: 修復「個股趨勢圖」無法顯示的問題 (修正 yfinance 多層索引問題)。
+        * **Rename**: 將「基礎生命線」更名為「🛡️ 守護生命線」。
         """)
 
 # 主畫面 - 回測報告
@@ -527,7 +506,7 @@ if st.session_state['backtest_result'] is not None:
     bt_df = st.session_state['backtest_result']
     st.markdown("---")
     
-    s_name = "基礎策略"
+    s_name = "🛡️ 守護生命線"
     if filter_treasure: s_name = "🔥 浴火重生"
     elif filter_royal: s_name = "👑 皇冠特選"
     
@@ -562,7 +541,6 @@ if st.session_state['backtest_result'] is not None:
         tabs = st.tabs(["📊 總覽"] + months)
         
         with tabs[0]:
-            # 統計包含 Win 與 驗證成功
             win_df = df_history[df_history['結果'].str.contains("Win") | df_history['結果'].str.contains("驗證成功")]
             win_count = len(win_df)
             total_count = len(df_history)
@@ -612,10 +590,10 @@ if st.session_state['master_df'] is not None:
         if '皇冠特選' in df.columns:
             df = df[df['皇冠特選'] == True]
         else:
-            # 相容性處理，若按了更新但 cache 還是舊的
+            # 相容性處理
             df = df[(df['收盤價'] > df['MA20']) & (df['MA20'] > df['MA60']) & (df['MA60'] > df['生命線'])]
     else:
-        # 基礎策略
+        # 守護生命線
         df = df[df['abs_bias'] <= bias_threshold]
         if filter_trend_up: df = df[df['生命線趨勢'] == "⬆️向上"]
         elif filter_trend_down: df = df[df['生命線趨勢'] == "⬇️向下"]
@@ -660,7 +638,8 @@ if st.session_state['master_df'] is not None:
                 plot_stock_chart(selected_row['完整代號'], selected_row['名稱'])
                 
                 c1, c2, c3 = st.columns(3)
-                c1.metric("收盤價", selected_row['收盤價'])
+                # 這裡幫您把小數點修整為兩位
+                c1.metric("收盤價", f"{selected_row['收盤價']:.2f}")
                 c2.metric("成交量", f"{selected_row['成交量(張)']} 張")
                 c3.metric("KD", selected_row['KD值'])
 
