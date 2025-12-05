@@ -8,8 +8,8 @@ import plotly.graph_objects as go
 import requests
 import os
 
-# --- 1. 網頁設定 ---
-VER = "ver3.15 (Mobile UI)"
+# --- 1. 網頁設定 (必須放在所有 st 指令的最前面) ---
+VER = "ver3.16 (Stable)"
 st.set_page_config(page_title=f"🍍 旺來-台股生命線({VER})", layout="wide")
 
 # --- CSS 優化: 加大字體與手機適配 ---
@@ -42,10 +42,15 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # --- 2. 核心功能區 ---
-@st.cache_data(ttl=3600)
+
+# --- 修正重點：加入 show_spinner=False 避免 Streamlit 3.13 執行緒錯誤 ---
+@st.cache_data(ttl=3600, show_spinner=False)
 def get_stock_list():
     """取得台股清單 (排除金融/ETF)"""
     try:
+        # 強制更新代碼，避免抓不到新股
+        twstock.__update_codes()
+        
         tse = twstock.twse
         otc = twstock.tpex
         stock_dict = {}
@@ -57,7 +62,8 @@ def get_stock_list():
             if info.type == '股票' and info.group not in exclude_industries:
                 stock_dict[f"{code}.TWO"] = {'name': info.name, 'code': code, 'group': info.group}
         return stock_dict
-    except:
+    except Exception as e:
+        print(f"Error: {e}")
         return {}
 
 def calculate_kd_values(df, n=9):
@@ -88,7 +94,7 @@ def run_strategy_backtest(stock_dict, progress_bar, use_trend_up, use_treasure, 
         try:
             data = yf.download(batch, period="2y", interval="1d", progress=False, auto_adjust=False)
             if not data.empty:
-                # 處理 MultiIndex
+                # 處理 MultiIndex (yfinance 新版相容性)
                 if isinstance(data.columns, pd.MultiIndex):
                     try:
                         df_c = data.xs('Close', axis=1, level=0)
@@ -392,9 +398,6 @@ def plot_stock_chart(ticker, name):
     except Exception as e: st.error(f"繪圖失敗: {e}")
 
 # --- 3. 介面顯示區 ---
-st.title(f"🍍 {VER} 旺來-台股生命線")
-st.markdown("---")
-
 if 'master_df' not in st.session_state: st.session_state['master_df'] = None
 if 'last_update' not in st.session_state: st.session_state['last_update'] = None
 if 'backtest_result' not in st.session_state: st.session_state['backtest_result'] = None
