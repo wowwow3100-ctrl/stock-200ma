@@ -2,8 +2,6 @@ streamlit
 yfinance
 pandas
 twstock
-lxml
 plotly
 requests
-streamlit-lottie
-matplotlib
+lxml
