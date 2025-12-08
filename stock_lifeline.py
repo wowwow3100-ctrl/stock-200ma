@@ -9,7 +9,7 @@ import requests
 import os
 
 # --- 1. 網頁設定 ---
-VER = "ver3.16 (Speed Boost)"
+VER = "ver3.18 (Stability Fix)"
 st.set_page_config(page_title=f"🍍 旺來-台股生命線({VER})", layout="wide")
 
 # --- 2. 核心功能區 ---
@@ -55,6 +55,8 @@ def calculate_kd_values(df, n=9):
 def run_strategy_backtest(stock_dict, progress_bar, use_trend_up, use_treasure, use_vol, use_royal, min_vol_threshold):
     results = []
     all_tickers = list(stock_dict.keys())
+    
+    # --- 修正: 回測時也使用穩定的 50 檔批次 ---
     BATCH_SIZE = 50 
     total_batches = (len(all_tickers) // BATCH_SIZE) + 1
     
@@ -139,6 +141,8 @@ def run_strategy_backtest(stock_dict, progress_bar, use_trend_up, use_treasure, 
                                     past_c = recent_c.iloc[:-1]
                                     past_ma = recent_ma.iloc[:-1]
                                     cond_past_down = (past_c < past_ma).any()
+                                    cond_prev_down = recent_c.iloc[-2] <= recent_ma.iloc[-2]
+                                    
                                     if cond_today_up and cond_past_down: is_match = True
                                 else:
                                     cond_near = (low_p <= ma200_val * 1.03) and (low_p >= ma200_val * 0.90) 
@@ -215,7 +219,10 @@ def run_strategy_backtest(stock_dict, progress_bar, use_trend_up, use_treasure, 
                                     '最高漲幅(%)': round(final_profit_pct, 2),
                                     '結果': "觀察中" if is_watching else result_status
                                 })
-                                break 
+                                
+                                if use_royal: 
+                                    break 
+                                
                     except:
                         continue
         except:
@@ -224,7 +231,6 @@ def run_strategy_backtest(stock_dict, progress_bar, use_trend_up, use_treasure, 
         progress = (i + 1) / total_batches
         progress_bar.progress(progress, text=f"深度回測中 (計算分月數據)...({int(progress*100)}%)")
         
-    # --- FIX: 防止結果為空時產生 KeyError ---
     if not results:
         return pd.DataFrame(columns=['月份', '代號', '名稱', '訊號日期', '訊號價', '最高漲幅(%)', '結果'])
 
@@ -234,8 +240,9 @@ def fetch_all_data(stock_dict, progress_bar, status_text):
     if not stock_dict: return pd.DataFrame()
     
     all_tickers = list(stock_dict.keys())
-    # --- 🚀 優化重點：加大 Batch Size 提升下載速度 ---
-    BATCH_SIZE = 150 
+    
+    # --- 關鍵修正：將 Batch Size 調回 50，避免資料遺失 ---
+    BATCH_SIZE = 50
     total_batches = (len(all_tickers) // BATCH_SIZE) + 1
     raw_data_list = []
 
@@ -336,7 +343,9 @@ def fetch_all_data(stock_dict, progress_bar, status_text):
         
         current_progress = (i + 1) / total_batches
         progress_bar.progress(current_progress, text=f"系統正在努力挖掘寶藏中...({int(current_progress*100)}%)")
-        time.sleep(0.05)
+        
+        # --- 關鍵修正：增加間隔時間，防止被 Rate Limit ---
+        time.sleep(0.3)
     
     return pd.DataFrame(raw_data_list)
 
@@ -392,10 +401,8 @@ if 'backtest_result' not in st.session_state:
 with st.sidebar:
     st.header("資料庫管理")
     
-    # --- 🚀 優化重點：快取檔案設定 ---
     CACHE_FILE = "stock_data_cache.csv"
 
-    # 1. 強制重置按鈕 (連同快取一起刪除)
     if st.button("🚨 強制重置系統"):
         st.cache_data.clear()
         st.session_state.clear()
@@ -404,7 +411,6 @@ with st.sidebar:
         st.success("系統已重置！請重新點擊更新股價。")
         st.rerun()
 
-    # 2. 自動載入快取 (秒開功能)
     if st.session_state['master_df'] is None and os.path.exists(CACHE_FILE):
         try:
             df_cache = pd.read_csv(CACHE_FILE)
@@ -415,7 +421,6 @@ with st.sidebar:
         except Exception as e:
             st.error(f"讀取快取失敗: {e}")
 
-    # 3. 更新按鈕 (下載並存檔)
     if st.button("🔄 下載最新股價 (開市用)", type="primary"):
         stock_dict = get_stock_list()
         
@@ -426,7 +431,7 @@ with st.sidebar:
             with placeholder_emoji:
                 st.markdown("""<div style="text-align: center; font-size: 40px; animation: blink 1s infinite;">🎁💰✨</div>
                     <style>@keyframes blink { 0% { opacity: 1; } 50% { opacity: 0.5; } 100% { opacity: 1; } }</style>
-                    <div style="text-align: center;">連線下載中 (Batch=150)...</div>""", unsafe_allow_html=True)
+                    <div style="text-align: center;">連線下載中 (Batch=50)...</div>""", unsafe_allow_html=True)
             
             status_text = st.empty()
             progress_bar = st.progress(0, text="準備下載...")
@@ -434,7 +439,6 @@ with st.sidebar:
             df = fetch_all_data(stock_dict, progress_bar, status_text)
             
             if not df.empty:
-                # --- 關鍵：下載完自動存檔 ---
                 df.to_csv(CACHE_FILE, index=False)
                 st.success("💾 資料已儲存至快取！")
             
@@ -517,10 +521,10 @@ with st.sidebar:
 
     with st.expander("📅 系統開發日誌"):
         st.markdown("""
-        ### Ver 3.16 (Speed Boost)
-        * **Opt**: 加入本地快取機制 (CSV)，重開網頁時可秒速載入。
-        * **Opt**: 加大下載批次量 (Batch=150)，大幅縮短更新時間。
-        * **Fix**: 修復「回測無結果」時產生的 KeyError 崩潰問題。
+        ### Ver 3.18 (Stability Fix)
+        * **Fix**: 修正資料下載不全的問題 (Batch Size 150 -> 50，增加間隔時間)。
+        * **Fix**: 修正「浴火重生」策略中，舊的歷史訊號會掩蓋昨日最新關注訊號的問題。
+        * **Opt**: 維持本地快取機制 (CSV)。
         """)
 
 # 主畫面 - 回測報告
