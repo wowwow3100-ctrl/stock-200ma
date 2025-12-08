@@ -9,7 +9,7 @@ import requests
 import os
 
 # --- 1. 網頁設定 ---
-VER = "ver3.15 (Fix Empty Backtest)"
+VER = "ver3.16 (Speed Boost)"
 st.set_page_config(page_title=f"🍍 旺來-台股生命線({VER})", layout="wide")
 
 # --- 2. 核心功能區 ---
@@ -224,11 +224,9 @@ def run_strategy_backtest(stock_dict, progress_bar, use_trend_up, use_treasure, 
         progress = (i + 1) / total_batches
         progress_bar.progress(progress, text=f"深度回測中 (計算分月數據)...({int(progress*100)}%)")
         
-    # --- FIX START: 防止結果為空時產生 KeyError ---
+    # --- FIX: 防止結果為空時產生 KeyError ---
     if not results:
-        # 回傳一個空的 DataFrame，但包含必要的欄位名稱
         return pd.DataFrame(columns=['月份', '代號', '名稱', '訊號日期', '訊號價', '最高漲幅(%)', '結果'])
-    # --- FIX END ---
 
     return pd.DataFrame(results)
 
@@ -236,7 +234,8 @@ def fetch_all_data(stock_dict, progress_bar, status_text):
     if not stock_dict: return pd.DataFrame()
     
     all_tickers = list(stock_dict.keys())
-    BATCH_SIZE = 30
+    # --- 🚀 優化重點：加大 Batch Size 提升下載速度 ---
+    BATCH_SIZE = 150 
     total_batches = (len(all_tickers) // BATCH_SIZE) + 1
     raw_data_list = []
 
@@ -345,7 +344,6 @@ def plot_stock_chart(ticker, name):
     try:
         df = yf.download(ticker, period="1y", interval="1d", progress=False, auto_adjust=False)
         
-        # --- 重要修正: 處理新版 yfinance 下載單一股票時可能出現的 MultiIndex 問題 ---
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
             
@@ -359,16 +357,12 @@ def plot_stock_chart(ticker, name):
         df['20MA'] = df['Close'].rolling(window=20).mean()
         df['60MA'] = df['Close'].rolling(window=60).mean()
         
-        # 只顯示近半年
         plot_df = df.tail(120).copy()
         plot_df['DateStr'] = plot_df.index.strftime('%Y-%m-%d')
 
         fig = go.Figure()
         
-        # 1. 收盤價
         fig.add_trace(go.Scatter(x=plot_df['DateStr'], y=plot_df['Close'], mode='lines', name='收盤價', line=dict(color='#00CC96', width=2.5)))
-        
-        # 2. 均線群
         fig.add_trace(go.Scatter(x=plot_df['DateStr'], y=plot_df['20MA'], mode='lines', name='20MA(月線)', line=dict(color='#AB63FA', width=1, dash='dot')))
         fig.add_trace(go.Scatter(x=plot_df['DateStr'], y=plot_df['60MA'], mode='lines', name='60MA(季線)', line=dict(color='#19D3F3', width=1, dash='dot')))
         fig.add_trace(go.Scatter(x=plot_df['DateStr'], y=plot_df['200MA'], mode='lines', name='200MA(生命線)', line=dict(color='#FFA15A', width=3)))
@@ -398,13 +392,31 @@ if 'backtest_result' not in st.session_state:
 with st.sidebar:
     st.header("資料庫管理")
     
+    # --- 🚀 優化重點：快取檔案設定 ---
+    CACHE_FILE = "stock_data_cache.csv"
+
+    # 1. 強制重置按鈕 (連同快取一起刪除)
     if st.button("🚨 強制重置系統"):
         st.cache_data.clear()
         st.session_state.clear()
+        if os.path.exists(CACHE_FILE):
+            os.remove(CACHE_FILE) 
         st.success("系統已重置！請重新點擊更新股價。")
         st.rerun()
 
-    if st.button("🔄 更新股價資料 (開市請按我)", type="primary"):
+    # 2. 自動載入快取 (秒開功能)
+    if st.session_state['master_df'] is None and os.path.exists(CACHE_FILE):
+        try:
+            df_cache = pd.read_csv(CACHE_FILE)
+            st.session_state['master_df'] = df_cache
+            mod_time = os.path.getmtime(CACHE_FILE)
+            st.session_state['last_update'] = datetime.fromtimestamp(mod_time).strftime("%Y-%m-%d %H:%M:%S")
+            st.success(f"⚡ 已快速載入上次資料 ({st.session_state['last_update']})")
+        except Exception as e:
+            st.error(f"讀取快取失敗: {e}")
+
+    # 3. 更新按鈕 (下載並存檔)
+    if st.button("🔄 下載最新股價 (開市用)", type="primary"):
         stock_dict = get_stock_list()
         
         if not stock_dict:
@@ -414,12 +426,17 @@ with st.sidebar:
             with placeholder_emoji:
                 st.markdown("""<div style="text-align: center; font-size: 40px; animation: blink 1s infinite;">🎁💰✨</div>
                     <style>@keyframes blink { 0% { opacity: 1; } 50% { opacity: 0.5; } 100% { opacity: 1; } }</style>
-                    <div style="text-align: center;">正在開鎖寶箱...</div>""", unsafe_allow_html=True)
+                    <div style="text-align: center;">連線下載中 (Batch=150)...</div>""", unsafe_allow_html=True)
             
             status_text = st.empty()
             progress_bar = st.progress(0, text="準備下載...")
             
             df = fetch_all_data(stock_dict, progress_bar, status_text)
+            
+            if not df.empty:
+                # --- 關鍵：下載完自動存檔 ---
+                df.to_csv(CACHE_FILE, index=False)
+                st.success("💾 資料已儲存至快取！")
             
             placeholder_emoji.empty()
             st.session_state['master_df'] = df
@@ -437,7 +454,6 @@ with st.sidebar:
     
     st.subheader("策略選擇")
     
-    # 策略改名
     strategy_mode = st.radio(
         "選擇篩選策略：",
         ("🛡️ 守護生命線 (反彈/支撐)", "🔥 浴火重生 (假跌破)", "👑 皇冠特選 (多頭排列)")
@@ -477,7 +493,6 @@ with st.sidebar:
     st.divider()
     
     st.caption("⚠️ 回測將使用上方設定的「最低成交量」進行過濾。")
-    # 按鈕文字修正
     if st.button("🧪 策略回測"):
         st.info("阿吉正在調閱過去2年的歷史檔案，進行深度驗證... (請稍候) ⏳")
         stock_dict = get_stock_list()
@@ -502,9 +517,10 @@ with st.sidebar:
 
     with st.expander("📅 系統開發日誌"):
         st.markdown("""
-        ### Ver 3.15 (Fix Empty Backtest)
+        ### Ver 3.16 (Speed Boost)
+        * **Opt**: 加入本地快取機制 (CSV)，重開網頁時可秒速載入。
+        * **Opt**: 加大下載批次量 (Batch=150)，大幅縮短更新時間。
         * **Fix**: 修復「回測無結果」時產生的 KeyError 崩潰問題。
-        * **Fix**: 修復「個股趨勢圖」無法顯示的問題 (修正 yfinance 多層索引問題)。
         """)
 
 # 主畫面 - 回測報告
@@ -583,7 +599,7 @@ if st.session_state['master_df'] is not None:
     df = st.session_state['master_df'].copy()
     
     if '生命線' not in df.columns:
-        st.error("⚠️ 資料結構已更新！請點擊 **「🔄 更新股價資料」**。")
+        st.error("⚠️ 資料結構已更新！請點擊 **「🚨 強制重置系統」** 後重新下載。")
         st.stop()
 
     # 基礎過濾
@@ -650,7 +666,7 @@ if st.session_state['master_df'] is not None:
                 c3.metric("KD", selected_row['KD值'])
 
 else:
-    st.warning("👈 請先點擊左側 sidebar 的 **「🔄 更新股價資料」** 按鈕開始挖寶！")
+    st.warning("👈 請先點擊左側 sidebar 的 **「🔄 下載最新股價」** 按鈕開始挖寶！")
     
     col1, col2, col3 = st.columns([1, 2, 1])
     with col2:
