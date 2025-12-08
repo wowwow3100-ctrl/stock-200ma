@@ -9,7 +9,7 @@ import requests
 import os
 
 # --- 1. 網頁設定 ---
-VER = "ver3.14 (Chart Fix)"
+VER = "ver3.15 (Fix Empty Backtest)"
 st.set_page_config(page_title=f"🍍 旺來-台股生命線({VER})", layout="wide")
 
 # --- 2. 核心功能區 ---
@@ -224,6 +224,12 @@ def run_strategy_backtest(stock_dict, progress_bar, use_trend_up, use_treasure, 
         progress = (i + 1) / total_batches
         progress_bar.progress(progress, text=f"深度回測中 (計算分月數據)...({int(progress*100)}%)")
         
+    # --- FIX START: 防止結果為空時產生 KeyError ---
+    if not results:
+        # 回傳一個空的 DataFrame，但包含必要的欄位名稱
+        return pd.DataFrame(columns=['月份', '代號', '名稱', '訊號日期', '訊號價', '最高漲幅(%)', '結果'])
+    # --- FIX END ---
+
     return pd.DataFrame(results)
 
 def fetch_all_data(stock_dict, progress_bar, status_text):
@@ -496,9 +502,9 @@ with st.sidebar:
 
     with st.expander("📅 系統開發日誌"):
         st.markdown("""
-        ### Ver 3.14 (Chart Fix)
+        ### Ver 3.15 (Fix Empty Backtest)
+        * **Fix**: 修復「回測無結果」時產生的 KeyError 崩潰問題。
         * **Fix**: 修復「個股趨勢圖」無法顯示的問題 (修正 yfinance 多層索引問題)。
-        * **Rename**: 將「基礎生命線」更名為「🛡️ 守護生命線」。
         """)
 
 # 主畫面 - 回測報告
