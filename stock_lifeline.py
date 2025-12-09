@@ -9,12 +9,12 @@ import requests
 import os
 
 # --- 1. 網頁設定 ---
-VER = "ver3.19 (Fix Idle Error)"
+VER = "ver3.19 (Log Update)"
 st.set_page_config(page_title=f"🍍 旺來-台股生命線({VER})", layout="wide")
 
 # --- 2. 核心功能區 ---
 
-# --- FIX: 加入 show_spinner=False 以避免閒置過久後的 RuntimeError ---
+# --- FIX: 加入 show_spinner=False 以避免閒置過久後的 RuntimeError (Ver 3.19) ---
 @st.cache_data(ttl=3600, show_spinner=False)
 def get_stock_list():
     """取得台股清單 (排除金融/ETF)"""
@@ -58,7 +58,7 @@ def run_strategy_backtest(stock_dict, progress_bar, use_trend_up, use_treasure, 
     results = []
     all_tickers = list(stock_dict.keys())
     
-    # 使用穩定的 50 檔批次
+    # 使用穩定的 50 檔批次 (Ver 3.18)
     BATCH_SIZE = 50 
     total_batches = (len(all_tickers) // BATCH_SIZE) + 1
     
@@ -222,6 +222,7 @@ def run_strategy_backtest(stock_dict, progress_bar, use_trend_up, use_treasure, 
                                     '結果': "觀察中" if is_watching else result_status
                                 })
                                 
+                                # 修正回測邏輯 (Ver 3.17)
                                 if use_royal: 
                                     break 
                                 
@@ -234,6 +235,7 @@ def run_strategy_backtest(stock_dict, progress_bar, use_trend_up, use_treasure, 
         progress_bar.progress(progress, text=f"深度回測中 (計算分月數據)...({int(progress*100)}%)")
         
     if not results:
+        # 修正空結果錯誤 (Ver 3.15)
         return pd.DataFrame(columns=['月份', '代號', '名稱', '訊號日期', '訊號價', '最高漲幅(%)', '結果'])
 
     return pd.DataFrame(results)
@@ -243,7 +245,7 @@ def fetch_all_data(stock_dict, progress_bar, status_text):
     
     all_tickers = list(stock_dict.keys())
     
-    # 穩定的 Batch Size
+    # 穩定的 Batch Size (Ver 3.18)
     BATCH_SIZE = 50
     total_batches = (len(all_tickers) // BATCH_SIZE) + 1
     raw_data_list = []
@@ -346,7 +348,7 @@ def fetch_all_data(stock_dict, progress_bar, status_text):
         current_progress = (i + 1) / total_batches
         progress_bar.progress(current_progress, text=f"系統正在努力挖掘寶藏中...({int(current_progress*100)}%)")
         
-        # 穩定性間隔
+        # 穩定性間隔 (Ver 3.18)
         time.sleep(0.3)
     
     return pd.DataFrame(raw_data_list)
@@ -521,12 +523,32 @@ with st.sidebar:
         bt_progress.empty()
         st.success("回測完成！請查看下方結果。")
 
+    # --- 更新日誌區塊 (包含最近更新時間) ---
     with st.expander("📅 系統開發日誌"):
+        # 標註最近一次執行時間
+        st.write(f"**🕒 系統最後重啟時間:** {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+        st.markdown("---")
+        
         st.markdown("""
         ### Ver 3.19 (Fix Idle Error)
-        * **Fix**: 修復系統閒置後，因快取更新導致的 RuntimeError (取消 Spinner 動畫)。
-        * **Fix**: 保持穩定的 Batch Size (50) 與 下載間隔，確保資料完整性。
-        * **Opt**: 浴火重生訊號邏輯修正與本地快取機制。
+        * **Fix**: 修復系統閒置過久後，自動更新快取導致的 RuntimeError (取消 Spinner 動畫)。
+
+        ### Ver 3.18 (Stability Fix)
+        * **Fix**: 修正資料下載不全的問題 (Batch Size 150 -> 50，增加間隔時間)。
+        * **Opt**: 優化「浴火重生」策略回測邏輯，確保能抓到昨日最新訊號。
+
+        ### Ver 3.17 (Signal Logic Fix)
+        * **Fix**: 修正回測迴圈邏輯，避免舊訊號掩蓋新訊號。
+
+        ### Ver 3.16 (Speed Boost)
+        * **Opt**: 加入本地快取機制 (CSV)，重開網頁秒載入。
+        * **Opt**: 嘗試加大下載批次量 (Batch=150)。
+
+        ### Ver 3.15 (Fix Empty Backtest)
+        * **Fix**: 修復回測無結果時的 KeyError 崩潰。
+
+        ### Ver 3.14 (Chart Fix)
+        * **Fix**: 修復 yfinance 改版導致的 MultiIndex 錯誤，恢復個股趨勢圖。
         """)
 
 # 主畫面 - 回測報告
