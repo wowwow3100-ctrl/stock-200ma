@@ -1,12 +1,3 @@
-沒問題，這是一勞永逸的解決方式。
-
-我已經把 **`show_spinner=False`** 的修正直接寫進這份完整的程式碼中了。這樣以後就算雲端主機休眠喚醒，也不會因為「轉圈圈動畫」卡住而報錯。
-
-### ✅ 完整修正版程式碼 (Ver 5.1 穩定版)
-
-請直接**全選複製**，覆蓋原本的檔案即可。
-
-```python
 import streamlit as st
 import yfinance as yf
 import pandas as pd
@@ -16,14 +7,15 @@ from datetime import datetime, timedelta
 import plotly.graph_objects as go
 import numpy as np
 import os
+import traceback # 用來抓取錯誤詳細資訊
 
-# --- 1. 網頁設定 ---
-VER = "ver5.1_Stable"
+# --- 1. 網頁設定 (必須放第一行) ---
+VER = "ver5.2_Safety"
 st.set_page_config(page_title=f"🍍 旺來-台股生命線({VER})", layout="wide")
 
 # --- 2. 核心功能區 ---
 
-# ★★★ 修正重點：加入 show_spinner=False 避免喚醒時報錯 ★★★
+# 修正重點1：加入 show_spinner=False 避免喚醒時報錯
 @st.cache_data(ttl=3600, show_spinner=False)
 def get_stock_list():
     try:
@@ -101,18 +93,14 @@ def run_optimization(stock_dict, progress_bar):
                             
                             if m200v == 0 or p_vol == 0: continue
 
-                            # 訊號
                             cond_near = (lp <= m200v * 1.03) and (lp >= m200v * 0.90)
                             cond_up = (cp > m200v)
                             basic = cond_near and cond_up
                             
                             trend_up = (m200v > float(m200.iloc[idx-20]))
                             vol_dbl = (vol > p_vol * 1.5)
-                            
-                            # 皇冠: 多頭排列
                             crown = (cp > m20v) and (m20v > m60v) and (m60v > m200v) and trend_up
 
-                            # 浴火重生
                             treasure = False
                             if idx >= 7:
                                 rc, rm = c.iloc[idx-7:idx+1], m200.iloc[idx-7:idx+1]
@@ -121,21 +109,18 @@ def run_optimization(stock_dict, progress_bar):
 
                             if not basic and not treasure and not crown: continue
                                 
-                            # 績效
                             if idx + 20 < len(c):
-                                # 靜態
                                 ret_s = (float(c.iloc[idx+20]) - cp) / cp * 100
                                 win_s = ret_s > 0
 
-                                # 動態
                                 exit_d = float(c.iloc[idx+20])
                                 for fi in range(1, 21):
                                     fidx = idx + fi
                                     if fidx >= len(c): break
-                                    if float(h.iloc[fidx]) >= cp * 1.10: # 停利
+                                    if float(h.iloc[fidx]) >= cp * 1.10: 
                                         exit_d = cp * 1.10
                                         break
-                                    if float(c.iloc[fidx]) < float(m200.iloc[fidx]) * 0.99: # 停損
+                                    if float(c.iloc[fidx]) < float(m200.iloc[fidx]) * 0.99: 
                                         exit_d = float(c.iloc[fidx])
                                         break
                                 ret_d = (exit_d - cp) / cp * 100
@@ -294,101 +279,111 @@ def plot_chart(ticker, name):
         st.plotly_chart(fig, use_container_width=True)
     except: st.error("繪圖失敗")
 
-# --- 3. 介面 ---
-st.title(f"🍍 {VER} 旺來-台股生命線")
-st.markdown("---")
+# --- 3. 主程式介面 (被包裹在 main 函數中以進行錯誤攔截) ---
+def main_app():
+    st.title(f"🍍 {VER} 旺來-台股生命線")
+    st.markdown("---")
 
-if 'mdf' not in st.session_state: st.session_state['mdf'] = None
-if 'opt' not in st.session_state: st.session_state['opt'] = None
-if 'bt' not in st.session_state: st.session_state['bt'] = None
+    if 'mdf' not in st.session_state: st.session_state['mdf'] = None
+    if 'opt' not in st.session_state: st.session_state['opt'] = None
+    if 'bt' not in st.session_state: st.session_state['bt'] = None
 
-with st.sidebar:
-    st.header("設定")
-    if st.button("🚨 重置"): st.cache_data.clear(); st.session_state.clear(); st.rerun()
-    
-    st.info("💡 歡迎使用！祝您操作順利，天天漲停！")
-    
-    if st.button("🔄 更新股價", type="primary"):
-        sdict = get_stock_list()
-        if sdict:
-            pb = st.progress(0, "下載中...")
-            st.session_state['mdf'] = fetch_data(sdict, pb)
-            pb.empty()
-            st.success("完成")
-    
-    st.divider()
-    bias = st.slider("乖離率", 0.5, 20.0, 5.0)
-    vol_min = st.number_input("最小量", 1000, step=100)
-    
-    st.subheader("篩選")
-    f_up = st.checkbox("📈 生命線向上")
-    f_tr = st.checkbox("🔥 浴火重生")
-    f_cr = st.checkbox("👑 皇冠特選 (多頭+動態)")
-    f_vo = st.checkbox("出量 (>1.5倍)")
-    
-    st.divider()
-    if st.button("🏆 策略擂台"):
-        sdict = get_stock_list()
-        pb = st.progress(0)
-        st.session_state['opt'] = run_optimization(sdict, pb)
-        pb.empty()
-    
-    if st.button("🧪 單一回測"):
-        sdict = get_stock_list()
-        pb = st.progress(0)
-        st.session_state['bt'] = run_backtest(sdict, pb, f_up, f_tr, f_vo, f_cr)
-        pb.empty()
-
-# 顯示區
-if st.session_state['opt'] is not None:
-    df = st.session_state['opt']
-    st.subheader("🏆 擂台結果 (持有20天 vs 動態出場)")
-    if not df.empty:
-        s_list = []
-        strats = {
-            "1. 裸測": df[df['Basic']],
-            "2. 順勢": df[df['Basic'] & df['Trend']],
-            "3. 爆量": df[df['Basic'] & df['Vol']],
-            "4. 浴火": df[df['Treasure']],
-            "7. 👑 皇冠(動態)": df[df['Crown']]
-        }
-        for n, d in strats.items():
-            if len(d)>0:
-                is_dyn = "皇冠" in n
-                w = len(d[d['W_Dynamic']]) if is_dyn else len(d[d['W_Static']])
-                p = d['P_Dynamic'].mean() if is_dyn else d['P_Static'].mean()
-                s_list.append({'策略':n, '次數':len(d), '勝率%': (w/len(d))*100, '報酬%': p})
+    with st.sidebar:
+        st.header("設定")
+        if st.button("🚨 重置"): st.cache_data.clear(); st.session_state.clear(); st.rerun()
         
-        res = pd.DataFrame(s_list).sort_values('勝率%', ascending=False)
-        st.dataframe(res.style.background_gradient(subset=['勝率%', '報酬%'], cmap='RdYlGn'), use_container_width=True)
+        st.info("💡 歡迎使用！祝您操作順利，天天漲停！")
+        
+        if st.button("🔄 更新股價", type="primary"):
+            sdict = get_stock_list()
+            if sdict:
+                pb = st.progress(0, "下載中...")
+                st.session_state['mdf'] = fetch_data(sdict, pb)
+                pb.empty()
+                st.success("完成")
+        
+        st.divider()
+        bias = st.slider("乖離率", 0.5, 20.0, 5.0)
+        vol_min = st.number_input("最小量", 1000, step=100)
+        
+        st.subheader("篩選")
+        f_up = st.checkbox("📈 生命線向上")
+        f_tr = st.checkbox("🔥 浴火重生")
+        f_cr = st.checkbox("👑 皇冠特選 (多頭+動態)")
+        f_vo = st.checkbox("出量 (>1.5倍)")
+        
+        st.divider()
+        if st.button("🏆 策略擂台"):
+            sdict = get_stock_list()
+            pb = st.progress(0)
+            st.session_state['opt'] = run_optimization(sdict, pb)
+            pb.empty()
+        
+        if st.button("🧪 單一回測"):
+            sdict = get_stock_list()
+            pb = st.progress(0)
+            st.session_state['bt'] = run_backtest(sdict, pb, f_up, f_tr, f_vo, f_cr)
+            pb.empty()
 
-if st.session_state['bt'] is not None:
-    df = st.session_state['bt']
-    st.subheader("🧪 回測報告")
-    if not df.empty:
-        win = len(df[df['Ret']>0])
-        st.metric("勝率", f"{int(win/len(df)*100)}%", f"均報 {round(df['Ret'].mean(),2)}%")
-        st.dataframe(df.style.map(lambda v: f'color: {"red" if v>0 else "green"}', subset=['Ret']), use_container_width=True)
-    else: st.warning("無資料")
-
-if st.session_state['mdf'] is not None:
-    df = st.session_state['mdf'].copy()
-    df = df[(df['abs_bias']<=bias) & (df['量']>=vol_min)]
-    if f_up: df = df[df['生命線'] < df['收盤']] # 簡易判斷，完整版可加趨勢
-    if f_tr: df = df[df['浴火']]
-    if f_cr: df = df[df['皇冠']]
-    if f_vo: df = df[df['量'] > df['昨量']*1.5]
-    
-    st.success(f"篩出 {len(df)} 檔")
-    c1, c2 = st.columns([1.5, 1])
-    with c1: st.dataframe(df, use_container_width=True)
-    with c2:
+    # 顯示區
+    if st.session_state['opt'] is not None:
+        df = st.session_state['opt']
+        st.subheader("🏆 擂台結果 (持有20天 vs 動態出場)")
         if not df.empty:
-            s = st.selectbox("選股看圖", df['完整代號'] + " " + df['名稱'])
-            row = df[df['完整代號']==s.split()[0]].iloc[0]
-            plot_chart(row['完整代號'], row['名稱'])
-else:
-    # 這裡也確保安全顯示圖片
-    if os.path.exists("welcome.jpg"):
-        st.image("welcome.jpg", width=300)
-```
+            s_list = []
+            strats = {
+                "1. 裸測": df[df['Basic']],
+                "2. 順勢": df[df['Basic'] & df['Trend']],
+                "3. 爆量": df[df['Basic'] & df['Vol']],
+                "4. 浴火": df[df['Treasure']],
+                "7. 👑 皇冠(動態)": df[df['Crown']]
+            }
+            for n, d in strats.items():
+                if len(d)>0:
+                    is_dyn = "皇冠" in n
+                    w = len(d[d['W_Dynamic']]) if is_dyn else len(d[d['W_Static']])
+                    p = d['P_Dynamic'].mean() if is_dyn else d['P_Static'].mean()
+                    s_list.append({'策略':n, '次數':len(d), '勝率%': (w/len(d))*100, '報酬%': p})
+            
+            res = pd.DataFrame(s_list).sort_values('勝率%', ascending=False)
+            st.dataframe(res.style.background_gradient(subset=['勝率%', '報酬%'], cmap='RdYlGn'), use_container_width=True)
+
+    if st.session_state['bt'] is not None:
+        df = st.session_state['bt']
+        st.subheader("🧪 回測報告")
+        if not df.empty:
+            win = len(df[df['Ret']>0])
+            st.metric("勝率", f"{int(win/len(df)*100)}%", f"均報 {round(df['Ret'].mean(),2)}%")
+            st.dataframe(df.style.map(lambda v: f'color: {"red" if v>0 else "green"}', subset=['Ret']), use_container_width=True)
+        else: st.warning("無資料")
+
+    if st.session_state['mdf'] is not None:
+        df = st.session_state['mdf'].copy()
+        df = df[(df['abs_bias']<=bias) & (df['量']>=vol_min)]
+        if f_up: df = df[df['生命線'] < df['收盤']]
+        if f_tr: df = df[df['浴火']]
+        if f_cr: df = df[df['皇冠']]
+        if f_vo: df = df[df['量'] > df['昨量']*1.5]
+        
+        st.success(f"篩出 {len(df)} 檔")
+        c1, c2 = st.columns([1.5, 1])
+        with c1: st.dataframe(df, use_container_width=True)
+        with c2:
+            if not df.empty:
+                s = st.selectbox("選股看圖", df['完整代號'] + " " + df['名稱'])
+                row = df[df['完整代號']==s.split()[0]].iloc[0]
+                plot_chart(row['完整代號'], row['名稱'])
+    else:
+        if os.path.exists("welcome.jpg"):
+            st.image("welcome.jpg", width=300)
+
+# --- 4. 程式進入點 (加入全域錯誤攔截) ---
+# 修正重點2：這裡會捕捉所有未知的 Crash，並顯示重啟建議
+if __name__ == "__main__":
+    try:
+        main_app()
+    except Exception as e:
+        st.error("⚠️ 系統發生暫時性錯誤")
+        st.warning("👉 建議解決方案：請點擊右下角 'Manage app' -> 選擇 'Reboot app' 即可恢復。")
+        with st.expander("查看錯誤詳細資訊 (給工程師看)"):
+            st.code(traceback.format_exc())
