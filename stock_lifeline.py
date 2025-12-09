@@ -9,11 +9,13 @@ import requests
 import os
 
 # --- 1. 網頁設定 ---
-VER = "ver3.18 (Stability Fix)"
+VER = "ver3.19 (Fix Idle Error)"
 st.set_page_config(page_title=f"🍍 旺來-台股生命線({VER})", layout="wide")
 
 # --- 2. 核心功能區 ---
-@st.cache_data(ttl=3600)
+
+# --- FIX: 加入 show_spinner=False 以避免閒置過久後的 RuntimeError ---
+@st.cache_data(ttl=3600, show_spinner=False)
 def get_stock_list():
     """取得台股清單 (排除金融/ETF)"""
     try:
@@ -56,7 +58,7 @@ def run_strategy_backtest(stock_dict, progress_bar, use_trend_up, use_treasure, 
     results = []
     all_tickers = list(stock_dict.keys())
     
-    # --- 修正: 回測時也使用穩定的 50 檔批次 ---
+    # 使用穩定的 50 檔批次
     BATCH_SIZE = 50 
     total_batches = (len(all_tickers) // BATCH_SIZE) + 1
     
@@ -241,7 +243,7 @@ def fetch_all_data(stock_dict, progress_bar, status_text):
     
     all_tickers = list(stock_dict.keys())
     
-    # --- 關鍵修正：將 Batch Size 調回 50，避免資料遺失 ---
+    # 穩定的 Batch Size
     BATCH_SIZE = 50
     total_batches = (len(all_tickers) // BATCH_SIZE) + 1
     raw_data_list = []
@@ -344,7 +346,7 @@ def fetch_all_data(stock_dict, progress_bar, status_text):
         current_progress = (i + 1) / total_batches
         progress_bar.progress(current_progress, text=f"系統正在努力挖掘寶藏中...({int(current_progress*100)}%)")
         
-        # --- 關鍵修正：增加間隔時間，防止被 Rate Limit ---
+        # 穩定性間隔
         time.sleep(0.3)
     
     return pd.DataFrame(raw_data_list)
@@ -521,10 +523,10 @@ with st.sidebar:
 
     with st.expander("📅 系統開發日誌"):
         st.markdown("""
-        ### Ver 3.18 (Stability Fix)
-        * **Fix**: 修正資料下載不全的問題 (Batch Size 150 -> 50，增加間隔時間)。
-        * **Fix**: 修正「浴火重生」策略中，舊的歷史訊號會掩蓋昨日最新關注訊號的問題。
-        * **Opt**: 維持本地快取機制 (CSV)。
+        ### Ver 3.19 (Fix Idle Error)
+        * **Fix**: 修復系統閒置後，因快取更新導致的 RuntimeError (取消 Spinner 動畫)。
+        * **Fix**: 保持穩定的 Batch Size (50) 與 下載間隔，確保資料完整性。
+        * **Opt**: 浴火重生訊號邏輯修正與本地快取機制。
         """)
 
 # 主畫面 - 回測報告
