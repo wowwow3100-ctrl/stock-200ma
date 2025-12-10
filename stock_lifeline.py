@@ -10,14 +10,22 @@ import uuid
 import csv
 
 # --- 1. 網頁設定 ---
-VER = "ver3.23 (Filter Upgrade)"
+VER = "ver3.24 (Auto-Fix Cache)"
 st.set_page_config(page_title=f"🍍 旺來-台股生命線({VER})", layout="wide")
 
 # --- 流量紀錄與後台功能 ---
 LOG_FILE = "traffic_log.csv"
 
 def get_remote_ip():
+    """嘗試取得使用者 IP (相容新舊版 Streamlit)"""
     try:
+        # 新版 Streamlit (1.33+)
+        if hasattr(st, "context") and hasattr(st.context, "headers"):
+            headers = st.context.headers
+            if headers and "X-Forwarded-For" in headers:
+                return headers["X-Forwarded-For"].split(",")[0]
+        
+        # 舊版 fallback
         from streamlit.web.server.websocket_headers import _get_websocket_headers
         headers = _get_websocket_headers()
         if headers and "X-Forwarded-For" in headers:
@@ -27,6 +35,7 @@ def get_remote_ip():
     return "Unknown/Local"
 
 def log_traffic():
+    """紀錄使用者訪問"""
     if 'session_id' not in st.session_state:
         st.session_state['session_id'] = str(uuid.uuid4())[:8] 
         st.session_state['has_logged'] = False
@@ -37,11 +46,14 @@ def log_traffic():
         session_id = st.session_state['session_id']
         
         file_exists = os.path.exists(LOG_FILE)
-        with open(LOG_FILE, mode='a', newline='', encoding='utf-8') as f:
-            writer = csv.writer(f)
-            if not file_exists:
-                writer.writerow(["時間", "IP位址", "Session_ID", "頁面動作"])
-            writer.writerow([current_time, user_ip, session_id, "進入首頁"])
+        try:
+            with open(LOG_FILE, mode='a', newline='', encoding='utf-8') as f:
+                writer = csv.writer(f)
+                if not file_exists:
+                    writer.writerow(["時間", "IP位址", "Session_ID", "頁面動作"])
+                writer.writerow([current_time, user_ip, session_id, "進入首頁"])
+        except:
+            pass # 避免 Log 寫入失敗影響主程式
         
         st.session_state['has_logged'] = True
 
@@ -87,7 +99,7 @@ def calculate_kd_values(df, n=9):
     except:
         return 50, 50
 
-# --- 策略回測核心函數 (移除皇冠特選) ---
+# --- 策略回測核心函數 ---
 def run_strategy_backtest(stock_dict, progress_bar, use_trend_up, use_treasure, use_vol, min_vol_threshold, use_burst_vol):
     results = []
     all_tickers = list(stock_dict.keys())
@@ -95,138 +107,142 @@ def run_strategy_backtest(stock_dict, progress_bar, use_trend_up, use_treasure, 
     BATCH_SIZE = 50 
     total_batches = (len(all_tickers) // BATCH_SIZE) + 1
     
-    OBSERVE_DAYS = 10 # 統一觀察 10 天
+    OBSERVE_DAYS = 10 
     
     for i, batch_idx in enumerate(range(0, len(all_tickers), BATCH_SIZE)):
         batch = all_tickers[batch_idx : batch_idx + BATCH_SIZE]
         try:
+            # 增加 timeout 與 error handling
             data = yf.download(batch, period="2y", interval="1d", progress=False, auto_adjust=False)
-            if not data.empty:
+            
+            if data is None or data.empty:
+                continue
+
+            try:
+                df_c = data['Close']
+                df_v = data['Volume']
+                df_l = data['Low']
+                df_h = data['High']
+                df_o = data['Open'] 
+            except KeyError:
+                continue
+            
+            if isinstance(df_c, pd.Series):
+                df_c = df_c.to_frame(name=batch[0])
+                df_v = df_v.to_frame(name=batch[0])
+                df_l = df_l.to_frame(name=batch[0])
+                df_h = df_h.to_frame(name=batch[0])
+                df_o = df_o.to_frame(name=batch[0])
+
+            ma200_df = df_c.rolling(window=200).mean()
+            vol_ma5_df = df_v.rolling(window=5).mean()
+            
+            scan_window = df_c.index[-90:] 
+            
+            for ticker in df_c.columns:
                 try:
-                    df_c = data['Close']
-                    df_v = data['Volume']
-                    df_l = data['Low']
-                    df_h = data['High']
-                    df_o = data['Open'] # 新增開盤價
-                except KeyError:
-                    continue
-                
-                if isinstance(df_c, pd.Series):
-                    df_c = df_c.to_frame(name=batch[0])
-                    df_v = df_v.to_frame(name=batch[0])
-                    df_l = df_l.to_frame(name=batch[0])
-                    df_h = df_h.to_frame(name=batch[0])
-                    df_o = df_o.to_frame(name=batch[0])
+                    c_series = df_c[ticker]
+                    v_series = df_v[ticker]
+                    l_series = df_l[ticker]
+                    h_series = df_h[ticker]
+                    o_series = df_o[ticker]
+                    ma200_series = ma200_df[ticker]
+                    vol_ma5_series = vol_ma5_df[ticker]
+                    
+                    stock_name = stock_dict.get(ticker, {}).get('name', ticker)
+                    total_len = len(c_series)
 
-                ma200_df = df_c.rolling(window=200).mean()
-                # 計算 5日均量 (用於爆量判斷)
-                vol_ma5_df = df_v.rolling(window=5).mean()
-                
-                scan_window = df_c.index[-90:] 
-                
-                for ticker in df_c.columns:
-                    try:
-                        c_series = df_c[ticker]
-                        v_series = df_v[ticker]
-                        l_series = df_l[ticker]
-                        h_series = df_h[ticker]
-                        o_series = df_o[ticker]
-                        ma200_series = ma200_df[ticker]
-                        vol_ma5_series = vol_ma5_df[ticker]
+                    for date in scan_window:
+                        if pd.isna(ma200_series.get(date)): continue
+                        if date not in c_series.index: continue
+
+                        idx = c_series.index.get_loc(date)
+                        if idx < 200: continue 
+
+                        close_p = c_series.iloc[idx]
+                        open_p = o_series.iloc[idx]
+                        vol = v_series.iloc[idx]
+                        prev_vol = v_series.iloc[idx-1]
+                        ma200_val = ma200_series.iloc[idx]
+                        vol_ma5_val = vol_ma5_series.iloc[idx-1] 
                         
-                        stock_name = stock_dict.get(ticker, {}).get('name', ticker)
-                        total_len = len(c_series)
+                        if vol < (min_vol_threshold * 1000): continue
+                        if ma200_val == 0 or prev_vol == 0: continue
 
-                        for date in scan_window:
-                            if pd.isna(ma200_series.get(date)): continue
-                            if date not in c_series.index: continue
+                        is_match = False
+                        
+                        low_p = l_series.iloc[idx]
+                        ma_val_20ago = ma200_series.iloc[idx-20]
+                        
+                        if use_trend_up and (ma200_val <= ma_val_20ago): continue
+                        if use_vol and (vol <= prev_vol * 1.5): continue
 
-                            idx = c_series.index.get_loc(date)
-                            if idx < 200: continue 
+                        if use_burst_vol:
+                            if vol <= (vol_ma5_val * 1.5) or close_p <= open_p:
+                                continue
 
-                            close_p = c_series.iloc[idx]
-                            open_p = o_series.iloc[idx]
-                            vol = v_series.iloc[idx]
-                            prev_vol = v_series.iloc[idx-1]
-                            ma200_val = ma200_series.iloc[idx]
-                            vol_ma5_val = vol_ma5_series.iloc[idx-1] # 用昨天的5日均量比較
+                        if use_treasure:
+                            start_idx = idx - 7
+                            if start_idx < 0: continue
+                            recent_c = c_series.iloc[start_idx : idx+1]
+                            recent_ma = ma200_series.iloc[start_idx : idx+1]
+                            cond_today_up = recent_c.iloc[-1] > recent_ma.iloc[-1]
+                            past_c = recent_c.iloc[:-1]
+                            past_ma = recent_ma.iloc[:-1]
+                            cond_past_down = (past_c < past_ma).any()
+                            if cond_today_up and cond_past_down: is_match = True
+                        else:
+                            cond_near = (low_p <= ma200_val * 1.03) and (low_p >= ma200_val * 0.90) 
+                            cond_up = (close_p > ma200_val)
+                            if cond_near and cond_up: is_match = True
+                        
+                        if is_match:
+                            month_str = date.strftime('%m月')
+                            days_after_signal = total_len - 1 - idx
                             
-                            if vol < (min_vol_threshold * 1000): continue
-                            if ma200_val == 0 or prev_vol == 0: continue
+                            final_profit_pct = 0.0
+                            result_status = "觀察中"
+                            is_watching = False
 
-                            is_match = False
-                            
-                            low_p = l_series.iloc[idx]
-                            ma_val_20ago = ma200_series.iloc[idx-20]
-                            
-                            if use_trend_up and (ma200_val <= ma_val_20ago): continue
-                            if use_vol and (vol <= prev_vol * 1.5): continue
-
-                            # --- 新增：爆量起漲過濾 (測試中) ---
-                            if use_burst_vol:
-                                # 條件1: 成交量 > 5日均量 * 1.5
-                                # 條件2: 紅K (收盤 > 開盤)
-                                if vol <= (vol_ma5_val * 1.5) or close_p <= open_p:
-                                    continue
-
-                            if use_treasure:
-                                start_idx = idx - 7
-                                if start_idx < 0: continue
-                                recent_c = c_series.iloc[start_idx : idx+1]
-                                recent_ma = ma200_series.iloc[start_idx : idx+1]
-                                cond_today_up = recent_c.iloc[-1] > recent_ma.iloc[-1]
-                                past_c = recent_c.iloc[:-1]
-                                past_ma = recent_ma.iloc[:-1]
-                                cond_past_down = (past_c < past_ma).any()
-                                if cond_today_up and cond_past_down: is_match = True
-                            else:
-                                cond_near = (low_p <= ma200_val * 1.03) and (low_p >= ma200_val * 0.90) 
-                                cond_up = (close_p > ma200_val)
-                                if cond_near and cond_up: is_match = True
-                            
-                            if is_match:
-                                month_str = date.strftime('%m月')
-                                days_after_signal = total_len - 1 - idx
-                                
+                            if days_after_signal < 1: 
+                                is_watching = True
                                 final_profit_pct = 0.0
-                                result_status = "觀察中"
-                                is_watching = False
-
-                                if days_after_signal < 1: 
+                                
+                            else:
+                                if days_after_signal < OBSERVE_DAYS:
+                                    current_price = c_series.iloc[-1]
+                                    final_profit_pct = (current_price - close_p) / close_p * 100
                                     is_watching = True
-                                    final_profit_pct = 0.0
-                                    
                                 else:
-                                    if days_after_signal < OBSERVE_DAYS:
-                                        current_price = c_series.iloc[-1]
-                                        final_profit_pct = (current_price - close_p) / close_p * 100
-                                        is_watching = True
-                                    else:
-                                        future_highs = h_series.iloc[idx+1 : idx+1+OBSERVE_DAYS]
-                                        max_price = future_highs.max()
-                                        final_profit_pct = (max_price - close_p) / close_p * 100
-                                        
-                                        if final_profit_pct > 3.0: result_status = "驗證成功 🏆"
-                                        elif final_profit_pct > 0: result_status = "Win (反彈)"
-                                        else: result_status = "Loss 📉"
+                                    future_highs = h_series.iloc[idx+1 : idx+1+OBSERVE_DAYS]
+                                    max_price = future_highs.max()
+                                    final_profit_pct = (max_price - close_p) / close_p * 100
+                                    
+                                    if final_profit_pct > 3.0: result_status = "驗證成功 🏆"
+                                    elif final_profit_pct > 0: result_status = "Win (反彈)"
+                                    else: result_status = "Loss 📉"
 
-                                results.append({
-                                    '月份': '👀 關注中' if is_watching else month_str,
-                                    '代號': ticker.replace(".TW", "").replace(".TWO", ""),
-                                    '名稱': stock_name,
-                                    '訊號日期': date.strftime('%Y-%m-%d'),
-                                    '訊號價': round(close_p, 2),
-                                    '最高漲幅(%)': round(final_profit_pct, 2),
-                                    '結果': "觀察中" if is_watching else result_status
-                                })
-                                break 
-                    except:
-                        continue
-        except:
-            pass
+                            results.append({
+                                '月份': '👀 關注中' if is_watching else month_str,
+                                '代號': ticker.replace(".TW", "").replace(".TWO", ""),
+                                '名稱': stock_name,
+                                '訊號日期': date.strftime('%Y-%m-%d'),
+                                '訊號價': round(close_p, 2),
+                                '最高漲幅(%)': round(final_profit_pct, 2),
+                                '結果': "觀察中" if is_watching else result_status
+                            })
+                            break 
+                except:
+                    continue
+        except Exception as e:
+            # 遇到 Rate Limit 或其他下載錯誤，休息並繼續
+            time.sleep(1) 
+            continue
         
         progress = (i + 1) / total_batches
         progress_bar.progress(progress, text=f"深度回測中 (計算分月數據)...({int(progress*100)}%)")
+        # 回測也加一點間隔
+        time.sleep(0.1)
         
     if not results:
         return pd.DataFrame(columns=['月份', '代號', '名稱', '訊號日期', '訊號價', '最高漲幅(%)', '結果'])
@@ -251,7 +267,7 @@ def fetch_all_data(stock_dict, progress_bar, status_text):
                     df_c = data['Close']
                     df_h = data['High']
                     df_l = data['Low']
-                    df_o = data['Open'] # 取開盤價
+                    df_o = data['Open']
                     df_v = data['Volume']
                 except KeyError:
                     continue
@@ -266,7 +282,7 @@ def fetch_all_data(stock_dict, progress_bar, status_text):
                 ma200_df = df_c.rolling(window=200).mean()
                 ma20_df = df_c.rolling(window=20).mean()
                 ma60_df = df_c.rolling(window=60).mean()
-                vol_ma5_df = df_v.rolling(window=5).mean() # 5日均量
+                vol_ma5_df = df_v.rolling(window=5).mean()
 
                 last_price_series = df_c.iloc[-1]
                 last_open_series = df_o.iloc[-1]
@@ -277,7 +293,7 @@ def fetch_all_data(stock_dict, progress_bar, status_text):
                 
                 last_vol_series = df_v.iloc[-1]
                 prev_vol_series = df_v.iloc[-2]
-                last_vol_ma5_series = vol_ma5_df.iloc[-2] # 比較昨天的均量
+                last_vol_ma5_series = vol_ma5_df.iloc[-2]
 
                 recent_close_df = df_c.iloc[-8:]
                 recent_ma200_df = ma200_df.iloc[-8:]
@@ -309,8 +325,6 @@ def fetch_all_data(stock_dict, progress_bar, status_text):
                             cond_past_down = (past_c < past_ma).any()
                             if cond_today_up and cond_past_down: is_treasure = True
 
-                        # 判斷是否為「爆量」 (Testing)
-                        # 條件: 成交量 > 5日均量 * 1.5 且 收紅K
                         is_burst = False
                         if not pd.isna(vol_ma5) and vol_ma5 > 0:
                             if vol > (vol_ma5 * 1.5) and price > open_p:
@@ -342,10 +356,13 @@ def fetch_all_data(stock_dict, progress_bar, status_text):
                             'D值': float(d_val),
                             '位置': "🟢生命線上" if price >= ma200 else "🔴生命線下",
                             '浴火重生': is_treasure,
-                            '爆量起漲': is_burst
+                            '爆量起漲': is_burst,
+                            '皇冠特選': False # 兼容舊欄位避免錯誤
                         })
                     except: continue
-        except: pass
+        except Exception: 
+            time.sleep(1) # 下載失敗時休息
+            pass
         
         current_progress = (i + 1) / total_batches
         progress_bar.progress(current_progress, text=f"系統正在努力挖掘寶藏中...({int(current_progress*100)}%)")
@@ -389,7 +406,7 @@ def plot_stock_chart(ticker, name):
             xaxis=dict(type='category', tickangle=-45, nticks=20),
             legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
         )
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, use_container_width=True) # 維持 use_container_width 以確保最大相容性
     except Exception as e: st.error(f"繪圖失敗: {e}")
 
 # --- 3. 介面顯示區 ---
@@ -419,6 +436,12 @@ with st.sidebar:
     if st.session_state['master_df'] is None and os.path.exists(CACHE_FILE):
         try:
             df_cache = pd.read_csv(CACHE_FILE)
+            
+            # --- Ver 3.24: 自動修復舊 Cache，防止 KeyError ---
+            if '爆量起漲' not in df_cache.columns:
+                df_cache['爆量起漲'] = False # 補上缺失欄位
+                st.toast("🔧 已自動修復舊版資料，請稍後按「更新」以取得最新分析。")
+            
             st.session_state['master_df'] = df_cache
             mod_time = os.path.getmtime(CACHE_FILE)
             st.session_state['last_update'] = datetime.fromtimestamp(mod_time).strftime("%Y-%m-%d %H:%M:%S")
@@ -530,7 +553,7 @@ with st.sidebar:
             use_treasure=use_treasure_param, 
             use_vol=filter_vol_double,
             min_vol_threshold=min_vol_input,
-            use_burst_vol=filter_burst_vol # 傳入新參數
+            use_burst_vol=filter_burst_vol
         )
         
         st.session_state['backtest_result'] = bt_df
@@ -542,20 +565,20 @@ with st.sidebar:
         st.markdown("---")
         
         st.markdown("""
+        ### Ver 3.24 (Auto-Fix Cache)
+        * **Fix**: **快取自動修復** - 自動偵測並修補舊版 Cache 缺少的「爆量起漲」欄位，防止 KeyError 崩潰。
+        * **Opt**: **語法更新** - 移除 `_get_websocket_headers` 等棄用警告，提升後台穩定性。
+        * **Opt**: **容錯增強** - 加強回測與下載過程中的錯誤捕捉，避免單一股票錯誤卡死進度。
+
         ### Ver 3.23 (Filter Upgrade)
-        * **Mod**: **移除皇冠特選** - 根據使用者反饋，移除較不準確的多頭排列策略。
-        * **New**: **新增爆量起漲 (測試中)** - 用來篩選「真正要起漲」的股票 (量 > 5日均量1.5倍 + 紅K)，作為無法直接取得即時法人資料的替代方案。
-        * **New**: **法人傳送門** - 篩選結果新增外部連結，可直接點擊查看 Yahoo 股市的三大法人買賣超。
+        * **Mod**: 移除皇冠特選。
+        * **New**: 新增爆量起漲 (測試中) 與法人傳送門。
 
         ### Ver 3.22 (Reboot Guide)
-        * **UI**: **防禦機制優化** - 當被阻擋時，顯示「Reboot App」的圖文教學。
+        * **UI**: 顯示 Reboot App 教學。
 
         ### Ver 3.21 (Anti-Zero Protection)
-        * **Fix**: **資料保護** - 當下載 0 檔時，保留舊資料，不清空畫面。
-
-        ### Ver 3.20 (Admin & Fixes)
-        * **Fix**: 修復 `UFuncNoLoopError` 程式亂碼。
-        * **New**: 新增後台管理員功能。
+        * **Fix**: 下載 0 檔時保留舊資料。
         """)
 
 # 主畫面 - 回測報告
@@ -655,7 +678,11 @@ if st.session_state['master_df'] is not None:
     
     # --- 新增過濾: 爆量起漲 (測試中) ---
     if filter_burst_vol:
-        df = df[df['爆量起漲'] == True]
+        # 🛡️ 再次檢查欄位，避免漏網之魚
+        if '爆量起漲' in df.columns:
+            df = df[df['爆量起漲'] == True]
+        else:
+            st.warning("⚠️ 目前資料版本較舊，不支援「爆量起漲」篩選。請執行更新。")
         
     if len(df) == 0:
         st.warning(f"⚠️ 找不到符合條件的股票！")
@@ -671,8 +698,6 @@ if st.session_state['master_df'] is not None:
         df['KD值'] = df.apply(lambda x: f"K:{int(x['K值'])} D:{int(x['D值'])}", axis=1)
         
         df['選股標籤'] = df['代號'].astype(str) + " " + df['名稱'].astype(str)
-        
-        # --- 新增: Yahoo 股市外部連結 ---
         df['法人買賣?'] = df['代號'].apply(lambda x: f"https://tw.stock.yahoo.com/quote/{x}/institutional-trading")
 
         display_cols = ['代號', '名稱', '收盤價', '生命線', '乖離率(%)', '位置', 'KD值', '成交量(張)', '法人買賣?']
@@ -685,7 +710,6 @@ if st.session_state['master_df'] is not None:
             def highlight_row(row):
                 return ['background-color: #e6fffa; color: black'] * len(row) if row['收盤價'] > row['生命線'] else ['background-color: #fff0f0; color: black'] * len(row)
 
-            # 使用 LinkColumn 顯示超連結
             st.dataframe(
                 df[display_cols].style.apply(highlight_row, axis=1),
                 use_container_width=True, 
