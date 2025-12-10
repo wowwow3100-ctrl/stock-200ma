@@ -10,16 +10,15 @@ import uuid
 import csv
 
 # --- 1. 網頁設定 ---
-VER = "ver3.20 (Admin & Fixes)"
+VER = "ver3.22 (Reboot Guide)"
 st.set_page_config(page_title=f"🍍 旺來-台股生命線({VER})", layout="wide")
 
-# --- 流量紀錄與後台功能 (Ver 3.20 新增) ---
+# --- 流量紀錄與後台功能 ---
 LOG_FILE = "traffic_log.csv"
 
 def get_remote_ip():
     """嘗試取得使用者 IP (針對 Streamlit Cloud)"""
     try:
-        # Streamlit Cloud 通常會將 IP 放在 X-Forwarded-For header
         from streamlit.web.server.websocket_headers import _get_websocket_headers
         headers = _get_websocket_headers()
         if headers and "X-Forwarded-For" in headers:
@@ -31,7 +30,7 @@ def get_remote_ip():
 def log_traffic():
     """紀錄使用者訪問"""
     if 'session_id' not in st.session_state:
-        st.session_state['session_id'] = str(uuid.uuid4())[:8] # 產生短 Session ID 識別單次連線
+        st.session_state['session_id'] = str(uuid.uuid4())[:8] 
         st.session_state['has_logged'] = False
 
     if not st.session_state['has_logged']:
@@ -39,7 +38,6 @@ def log_traffic():
         user_ip = get_remote_ip()
         session_id = st.session_state['session_id']
         
-        # 寫入 CSV
         file_exists = os.path.exists(LOG_FILE)
         with open(LOG_FILE, mode='a', newline='', encoding='utf-8') as f:
             writer = csv.writer(f)
@@ -49,12 +47,10 @@ def log_traffic():
         
         st.session_state['has_logged'] = True
 
-# 執行流量紀錄
 log_traffic()
 
 # --- 2. 核心功能區 ---
 
-# [歷史修復] Ver 3.19: 加入 show_spinner=False 避免閒置過久產生 RuntimeError
 @st.cache_data(ttl=3600, show_spinner=False)
 def get_stock_list():
     """取得台股清單 (排除金融/ETF)"""
@@ -98,7 +94,6 @@ def run_strategy_backtest(stock_dict, progress_bar, use_trend_up, use_treasure, 
     results = []
     all_tickers = list(stock_dict.keys())
     
-    # [歷史修復] Ver 3.18: Batch Size 調回 50 增加穩定性，避免 yfinance 抓不到資料
     BATCH_SIZE = 50 
     total_batches = (len(all_tickers) // BATCH_SIZE) + 1
     
@@ -262,7 +257,6 @@ def run_strategy_backtest(stock_dict, progress_bar, use_trend_up, use_treasure, 
                                     '結果': "觀察中" if is_watching else result_status
                                 })
                                 
-                                # [歷史修復] Ver 3.17: 修正浴火重生邏輯，不使用 break 以免遺漏最新訊號
                                 if use_royal: 
                                     break 
                                 
@@ -275,7 +269,6 @@ def run_strategy_backtest(stock_dict, progress_bar, use_trend_up, use_treasure, 
         progress_bar.progress(progress, text=f"深度回測中 (計算分月數據)...({int(progress*100)}%)")
         
     if not results:
-        # [歷史修復] Ver 3.15: 修正回測無結果時的 KeyError
         return pd.DataFrame(columns=['月份', '代號', '名稱', '訊號日期', '訊號價', '最高漲幅(%)', '結果'])
 
     return pd.DataFrame(results)
@@ -285,7 +278,6 @@ def fetch_all_data(stock_dict, progress_bar, status_text):
     
     all_tickers = list(stock_dict.keys())
     
-    # [歷史修復] Ver 3.18: 穩定的 Batch Size = 50
     BATCH_SIZE = 50
     total_batches = (len(all_tickers) // BATCH_SIZE) + 1
     raw_data_list = []
@@ -388,7 +380,6 @@ def fetch_all_data(stock_dict, progress_bar, status_text):
         current_progress = (i + 1) / total_batches
         progress_bar.progress(current_progress, text=f"系統正在努力挖掘寶藏中...({int(current_progress*100)}%)")
         
-        # [歷史修復] Ver 3.18: 增加間隔時間避免被 Rate Limit
         time.sleep(0.3)
     
     return pd.DataFrame(raw_data_list)
@@ -397,7 +388,6 @@ def plot_stock_chart(ticker, name):
     try:
         df = yf.download(ticker, period="1y", interval="1d", progress=False, auto_adjust=False)
         
-        # [歷史修復] Ver 3.14: 修正 MultiIndex 問題
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
             
@@ -446,7 +436,6 @@ if 'backtest_result' not in st.session_state:
 with st.sidebar:
     st.header("資料庫管理")
     
-    # [歷史修復] Ver 3.16: 加入本地快取機制
     CACHE_FILE = "stock_data_cache.csv"
 
     if st.button("🚨 強制重置系統"):
@@ -484,38 +473,45 @@ with st.sidebar:
             
             df = fetch_all_data(stock_dict, progress_bar, status_text)
             
+            # --- Ver 3.21 & 3.22: 阻擋防禦與教學提示 ---
             if not df.empty:
                 df.to_csv(CACHE_FILE, index=False)
-                st.success("💾 資料已儲存至快取！")
+                st.session_state['master_df'] = df
+                st.session_state['last_update'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                st.success(f"更新完成！共 {len(df)} 檔資料")
+            else:
+                st.error("⛔ 由於申請次數過多，連線資料庫阻擋。")
+                
+                # --- Ver 3.22: 新增 REBOOT APP 教學 ---
+                with st.expander("🆘 嘗試解決方案：Reboot App (點我展開)"):
+                    st.info("""
+                    **請嘗試「重啟應用程式」來更換連線環境：**
+                    1. 點擊網頁右上角的 **「⋮」** (三個點按鈕)。
+                    2. 選擇 **「Reboot App」** (或 Clear Cache and Rerun)。
+                    3. 等待網頁重新載入後，再試一次。
+                    """)
             
             placeholder_emoji.empty()
-            st.session_state['master_df'] = df
-            st.session_state['last_update'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             progress_bar.empty()
-            st.success(f"更新完成！共 {len(df)} 檔資料")
         
     if st.session_state['last_update']:
         st.caption(f"最後更新：{st.session_state['last_update']}")
     
     st.divider()
     
-    # --- Ver 3.20 新增：後台管理介面 ---
     with st.expander("🔐 管理員後台"):
         admin_pwd = st.text_input("請輸入管理密碼", type="password")
-        if admin_pwd == "admin888": # 預設密碼，可自行修改
+        if admin_pwd == "admin888": 
             if os.path.exists(LOG_FILE):
                 st.markdown("### 🚦 流量統計 (最近紀錄)")
                 log_df = pd.read_csv(LOG_FILE)
-                # 簡單計算統計
                 total_visits = len(log_df)
                 unique_users = log_df['Session_ID'].nunique()
                 st.metric("總點擊次數", total_visits)
                 st.metric("獨立訪客數 (Session)", unique_users)
                 
-                # 顯示詳細表格
                 st.dataframe(log_df.sort_values(by="時間", ascending=False), use_container_width=True)
                 
-                # 下載 Log 按鈕
                 with open(LOG_FILE, "rb") as f:
                     st.download_button("📥 下載完整 Log (CSV)", f, file_name="traffic_log.csv", mime="text/csv")
             else:
@@ -593,23 +589,28 @@ with st.sidebar:
         st.success("回測完成！請查看下方結果。")
 
     with st.expander("📅 系統開發日誌"):
+        st.write(f"**🕒 系統最後重啟時間:** {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+        st.markdown("---")
+        
         st.markdown("""
+        ### Ver 3.22 (Reboot Guide)
+        * **UI**: **防禦機制優化** - 當被阻擋時，顯示「Reboot App」的圖文教學，引導使用者更換 IP。
+
+        ### Ver 3.21 (Anti-Zero Protection)
+        * **Fix**: **資料保護** - 當下載 0 檔時，保留舊資料，不清空畫面。
+
         ### Ver 3.20 (Admin & Fixes)
-        * **Fix**: 修復 `UFuncNoLoopError` 程式亂碼 (字串強制轉型)。
-        * **New**: 新增隱藏式管理員後台，可查看點擊流量與下載 Log。
-        * **Doc**: 整合所有歷史錯誤修復說明於程式碼備註中。
+        * **Fix**: 修復 `UFuncNoLoopError` 程式亂碼。
+        * **New**: 新增後台管理員功能。
 
         ### Ver 3.19 (Fix Idle Error)
-        * **Fix**: 修復系統閒置後，因快取更新導致的 RuntimeError (取消 Spinner 動畫)。
+        * **Fix**: 修復系統閒置後的 RuntimeError。
 
         ### Ver 3.18 (Stability Fix)
-        * **Fix**: 修正資料下載不全的問題 (Batch Size 150 -> 50，增加間隔時間)。
+        * **Fix**: 修正資料下載不全的問題 (Batch Size 50)。
 
         ### Ver 3.16 (Speed Boost)
-        * **Opt**: 加入本地快取機制 (CSV)，重開網頁秒載入。
-
-        ### Ver 3.14 (Chart Fix)
-        * **Fix**: 修復 yfinance 改版導致的 MultiIndex 錯誤。
+        * **Opt**: 加入本地快取機制。
         """)
 
 # 主畫面 - 回測報告
@@ -726,7 +727,7 @@ if st.session_state['master_df'] is not None:
         df['成交量(張)'] = (df['成交量'] / 1000).astype(int)
         df['KD值'] = df.apply(lambda x: f"K:{int(x['K值'])} D:{int(x['D值'])}", axis=1)
         
-        # [歷史修復] Ver 3.20: 強制將代號與名稱轉為字串，防止數字與文字相加導致的 UFuncNoLoopError
+        # [歷史修復] Ver 3.20: 強制將代號與名稱轉為字串
         df['選股標籤'] = df['代號'].astype(str) + " " + df['名稱'].astype(str)
         
         display_cols = ['代號', '名稱', '收盤價', '生命線', '乖離率(%)', '位置', 'KD值', '成交量(張)']
