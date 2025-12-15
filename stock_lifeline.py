@@ -10,22 +10,19 @@ import uuid
 import csv
 
 # --- 1. 網頁設定 ---
-VER = "ver3.24 (Auto-Fix Cache)"
+VER = "ver3.25 (Streak Counter)"
 st.set_page_config(page_title=f"🍍 旺來-台股生命線({VER})", layout="wide")
 
 # --- 流量紀錄與後台功能 ---
 LOG_FILE = "traffic_log.csv"
 
 def get_remote_ip():
-    """嘗試取得使用者 IP (相容新舊版 Streamlit)"""
+    """嘗試取得使用者 IP"""
     try:
-        # 新版 Streamlit (1.33+)
         if hasattr(st, "context") and hasattr(st.context, "headers"):
             headers = st.context.headers
             if headers and "X-Forwarded-For" in headers:
                 return headers["X-Forwarded-For"].split(",")[0]
-        
-        # 舊版 fallback
         from streamlit.web.server.websocket_headers import _get_websocket_headers
         headers = _get_websocket_headers()
         if headers and "X-Forwarded-For" in headers:
@@ -53,8 +50,7 @@ def log_traffic():
                     writer.writerow(["時間", "IP位址", "Session_ID", "頁面動作"])
                 writer.writerow([current_time, user_ip, session_id, "進入首頁"])
         except:
-            pass # 避免 Log 寫入失敗影響主程式
-        
+            pass 
         st.session_state['has_logged'] = True
 
 log_traffic()
@@ -68,19 +64,15 @@ def get_stock_list():
         tse = twstock.twse
         otc = twstock.tpex
         stock_dict = {}
-        
         exclude_industries = ['金融保險業', '存託憑證']
-
         for code, info in tse.items():
             if info.type == '股票':
                 if info.group not in exclude_industries:
                     stock_dict[f"{code}.TW"] = {'name': info.name, 'code': code, 'group': info.group}
-                    
         for code, info in otc.items():
             if info.type == '股票':
                 if info.group not in exclude_industries:
                     stock_dict[f"{code}.TWO"] = {'name': info.name, 'code': code, 'group': info.group}
-                
         return stock_dict
     except:
         return {}
@@ -103,20 +95,15 @@ def calculate_kd_values(df, n=9):
 def run_strategy_backtest(stock_dict, progress_bar, use_trend_up, use_treasure, use_vol, min_vol_threshold, use_burst_vol):
     results = []
     all_tickers = list(stock_dict.keys())
-    
     BATCH_SIZE = 50 
     total_batches = (len(all_tickers) // BATCH_SIZE) + 1
-    
     OBSERVE_DAYS = 10 
     
     for i, batch_idx in enumerate(range(0, len(all_tickers), BATCH_SIZE)):
         batch = all_tickers[batch_idx : batch_idx + BATCH_SIZE]
         try:
-            # 增加 timeout 與 error handling
             data = yf.download(batch, period="2y", interval="1d", progress=False, auto_adjust=False)
-            
-            if data is None or data.empty:
-                continue
+            if data is None or data.empty: continue
 
             try:
                 df_c = data['Close']
@@ -124,8 +111,7 @@ def run_strategy_backtest(stock_dict, progress_bar, use_trend_up, use_treasure, 
                 df_l = data['Low']
                 df_h = data['High']
                 df_o = data['Open'] 
-            except KeyError:
-                continue
+            except KeyError: continue
             
             if isinstance(df_c, pd.Series):
                 df_c = df_c.to_frame(name=batch[0])
@@ -136,7 +122,6 @@ def run_strategy_backtest(stock_dict, progress_bar, use_trend_up, use_treasure, 
 
             ma200_df = df_c.rolling(window=200).mean()
             vol_ma5_df = df_v.rolling(window=5).mean()
-            
             scan_window = df_c.index[-90:] 
             
             for ticker in df_c.columns:
@@ -170,7 +155,6 @@ def run_strategy_backtest(stock_dict, progress_bar, use_trend_up, use_treasure, 
                         if ma200_val == 0 or prev_vol == 0: continue
 
                         is_match = False
-                        
                         low_p = l_series.iloc[idx]
                         ma_val_20ago = ma200_series.iloc[idx-20]
                         
@@ -178,8 +162,7 @@ def run_strategy_backtest(stock_dict, progress_bar, use_trend_up, use_treasure, 
                         if use_vol and (vol <= prev_vol * 1.5): continue
 
                         if use_burst_vol:
-                            if vol <= (vol_ma5_val * 1.5) or close_p <= open_p:
-                                continue
+                            if vol <= (vol_ma5_val * 1.5) or close_p <= open_p: continue
 
                         if use_treasure:
                             start_idx = idx - 7
@@ -199,7 +182,6 @@ def run_strategy_backtest(stock_dict, progress_bar, use_trend_up, use_treasure, 
                         if is_match:
                             month_str = date.strftime('%m月')
                             days_after_signal = total_len - 1 - idx
-                            
                             final_profit_pct = 0.0
                             result_status = "觀察中"
                             is_watching = False
@@ -207,7 +189,6 @@ def run_strategy_backtest(stock_dict, progress_bar, use_trend_up, use_treasure, 
                             if days_after_signal < 1: 
                                 is_watching = True
                                 final_profit_pct = 0.0
-                                
                             else:
                                 if days_after_signal < OBSERVE_DAYS:
                                     current_price = c_series.iloc[-1]
@@ -217,7 +198,6 @@ def run_strategy_backtest(stock_dict, progress_bar, use_trend_up, use_treasure, 
                                     future_highs = h_series.iloc[idx+1 : idx+1+OBSERVE_DAYS]
                                     max_price = future_highs.max()
                                     final_profit_pct = (max_price - close_p) / close_p * 100
-                                    
                                     if final_profit_pct > 3.0: result_status = "驗證成功 🏆"
                                     elif final_profit_pct > 0: result_status = "Win (反彈)"
                                     else: result_status = "Loss 📉"
@@ -232,16 +212,13 @@ def run_strategy_backtest(stock_dict, progress_bar, use_trend_up, use_treasure, 
                                 '結果': "觀察中" if is_watching else result_status
                             })
                             break 
-                except:
-                    continue
-        except Exception as e:
-            # 遇到 Rate Limit 或其他下載錯誤，休息並繼續
+                except: continue
+        except Exception:
             time.sleep(1) 
             continue
         
         progress = (i + 1) / total_batches
         progress_bar.progress(progress, text=f"深度回測中 (計算分月數據)...({int(progress*100)}%)")
-        # 回測也加一點間隔
         time.sleep(0.1)
         
     if not results:
@@ -253,7 +230,6 @@ def fetch_all_data(stock_dict, progress_bar, status_text):
     if not stock_dict: return pd.DataFrame()
     
     all_tickers = list(stock_dict.keys())
-    
     BATCH_SIZE = 50
     total_batches = (len(all_tickers) // BATCH_SIZE) + 1
     raw_data_list = []
@@ -269,8 +245,7 @@ def fetch_all_data(stock_dict, progress_bar, status_text):
                     df_l = data['Low']
                     df_o = data['Open']
                     df_v = data['Volume']
-                except KeyError:
-                    continue
+                except KeyError: continue
 
                 if isinstance(df_c, pd.Series):
                     df_c = df_c.to_frame(name=batch[0])
@@ -330,6 +305,23 @@ def fetch_all_data(stock_dict, progress_bar, status_text):
                             if vol > (vol_ma5 * 1.5) and price > open_p:
                                 is_burst = True
 
+                        # --- Ver 3.25 新增：計算連續站上生命線天數 ---
+                        streak_days = 0
+                        try:
+                            # 往回檢查最多 60 天
+                            for k in range(60):
+                                check_idx = -1 - k
+                                if abs(check_idx) > len(df_c[ticker]): break
+                                
+                                # 檢查該日收盤是否大於該日生命線
+                                if df_c[ticker].iloc[check_idx] > ma200_df[ticker].iloc[check_idx]:
+                                    streak_days += 1
+                                else:
+                                    break # 一旦跌破就停止計數
+                        except:
+                            streak_days = 0
+                        # ---------------------------------------------
+
                         stock_df = pd.DataFrame({'Close': df_c[ticker], 'High': df_h[ticker], 'Low': df_l[ticker]}).dropna()
                         k_val, d_val = 0, 0
                         if len(stock_df) >= 9:
@@ -357,16 +349,15 @@ def fetch_all_data(stock_dict, progress_bar, status_text):
                             '位置': "🟢生命線上" if price >= ma200 else "🔴生命線下",
                             '浴火重生': is_treasure,
                             '爆量起漲': is_burst,
-                            '皇冠特選': False # 兼容舊欄位避免錯誤
+                            '站上天數': int(streak_days) # 新欄位
                         })
                     except: continue
         except Exception: 
-            time.sleep(1) # 下載失敗時休息
+            time.sleep(1)
             pass
         
         current_progress = (i + 1) / total_batches
         progress_bar.progress(current_progress, text=f"系統正在努力挖掘寶藏中...({int(current_progress*100)}%)")
-        
         time.sleep(0.3)
     
     return pd.DataFrame(raw_data_list)
@@ -374,10 +365,8 @@ def fetch_all_data(stock_dict, progress_bar, status_text):
 def plot_stock_chart(ticker, name):
     try:
         df = yf.download(ticker, period="1y", interval="1d", progress=False, auto_adjust=False)
-        
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
-            
         if df.index.tz is not None: df.index = df.index.tz_localize(None)
         df = df[df['Volume'] > 0].dropna()
         if df.empty:
@@ -392,7 +381,6 @@ def plot_stock_chart(ticker, name):
         plot_df['DateStr'] = plot_df.index.strftime('%Y-%m-%d')
 
         fig = go.Figure()
-        
         fig.add_trace(go.Scatter(x=plot_df['DateStr'], y=plot_df['Close'], mode='lines', name='收盤價', line=dict(color='#00CC96', width=2.5)))
         fig.add_trace(go.Scatter(x=plot_df['DateStr'], y=plot_df['20MA'], mode='lines', name='20MA(月線)', line=dict(color='#AB63FA', width=1, dash='dot')))
         fig.add_trace(go.Scatter(x=plot_df['DateStr'], y=plot_df['60MA'], mode='lines', name='60MA(季線)', line=dict(color='#19D3F3', width=1, dash='dot')))
@@ -406,7 +394,7 @@ def plot_stock_chart(ticker, name):
             xaxis=dict(type='category', tickangle=-45, nticks=20),
             legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
         )
-        st.plotly_chart(fig, use_container_width=True) # 維持 use_container_width 以確保最大相容性
+        st.plotly_chart(fig, use_container_width=True)
     except Exception as e: st.error(f"繪圖失敗: {e}")
 
 # --- 3. 介面顯示區 ---
@@ -422,7 +410,6 @@ if 'backtest_result' not in st.session_state:
 
 with st.sidebar:
     st.header("資料庫管理")
-    
     CACHE_FILE = "stock_data_cache.csv"
 
     if st.button("🚨 強制重置系統"):
@@ -437,11 +424,12 @@ with st.sidebar:
         try:
             df_cache = pd.read_csv(CACHE_FILE)
             
-            # --- Ver 3.24: 自動修復舊 Cache，防止 KeyError ---
+            # --- Auto-Fix Cache (Ver 3.24 & 3.25) ---
             if '爆量起漲' not in df_cache.columns:
-                df_cache['爆量起漲'] = False # 補上缺失欄位
-                st.toast("🔧 已自動修復舊版資料，請稍後按「更新」以取得最新分析。")
-            
+                df_cache['爆量起漲'] = False
+            if '站上天數' not in df_cache.columns: # Ver 3.25 新增修復
+                df_cache['站上天數'] = 0 
+                
             st.session_state['master_df'] = df_cache
             mod_time = os.path.getmtime(CACHE_FILE)
             st.session_state['last_update'] = datetime.fromtimestamp(mod_time).strftime("%Y-%m-%d %H:%M:%S")
@@ -451,7 +439,6 @@ with st.sidebar:
 
     if st.button("🔄 下載最新股價 (開市用)", type="primary"):
         stock_dict = get_stock_list()
-        
         if not stock_dict:
             st.error("無法取得股票清單，請稍後再試或按上方重置按鈕。")
         else:
@@ -463,7 +450,6 @@ with st.sidebar:
             
             status_text = st.empty()
             progress_bar = st.progress(0, text="準備下載...")
-            
             df = fetch_all_data(stock_dict, progress_bar, status_text)
             
             if not df.empty:
@@ -499,9 +485,7 @@ with st.sidebar:
                 unique_users = log_df['Session_ID'].nunique()
                 st.metric("總點擊次數", total_visits)
                 st.metric("獨立訪客數 (Session)", unique_users)
-                
                 st.dataframe(log_df.sort_values(by="時間", ascending=False), use_container_width=True)
-                
                 with open(LOG_FILE, "rb") as f:
                     st.download_button("📥 下載完整 Log (CSV)", f, file_name="traffic_log.csv", mime="text/csv")
             else:
@@ -516,11 +500,7 @@ with st.sidebar:
     min_vol_input = st.number_input("最低成交量 (張)", value=1000, step=100)
     
     st.subheader("策略選擇")
-    
-    strategy_mode = st.radio(
-        "選擇篩選策略：",
-        ("🛡️ 守護生命線 (反彈/支撐)", "🔥 浴火重生 (假跌破)")
-    )
+    strategy_mode = st.radio("選擇篩選策略：", ("🛡️ 守護生命線 (反彈/支撐)", "🔥 浴火重生 (假跌破)"))
 
     st.caption("基礎條件：")
     col1, col2 = st.columns(2)
@@ -531,7 +511,7 @@ with st.sidebar:
     
     st.markdown("---")
     st.caption("🧪 實驗室 (測試中 - 模擬法人起漲)：")
-    filter_burst_vol = st.checkbox("🔥 爆量起漲 (量>5日均量1.5倍 + 紅K)", value=False, help="模擬主力或法人進場訊號：今日成交量大於過去5日均量50%以上，且收盤價高於開盤價。")
+    filter_burst_vol = st.checkbox("🔥 爆量起漲 (量>5日均量1.5倍 + 紅K)", value=False, help="模擬主力或法人進場訊號")
 
     if strategy_mode == "🔥 浴火重生 (假跌破)":
         st.info("ℹ️ 尋找：過去7日內曾跌破，但今日站回生命線的個股。")
@@ -563,22 +543,17 @@ with st.sidebar:
     with st.expander("📅 系統開發日誌"):
         st.write(f"**🕒 系統最後重啟時間:** {datetime.now().strftime('%Y-%m-%d %H:%M')}")
         st.markdown("---")
-        
         st.markdown("""
+        ### Ver 3.25 (Streak Counter)
+        * **New**: **站上天數** - 新增「連續站上生命線天數」欄位，可快速辨識股票是「剛起漲 (1天)」還是「趨勢穩健 (多天)」。
+        * **Fix**: 自動修復舊版 Cache 缺少的「站上天數」欄位。
+
         ### Ver 3.24 (Auto-Fix Cache)
-        * **Fix**: **快取自動修復** - 自動偵測並修補舊版 Cache 缺少的「爆量起漲」欄位，防止 KeyError 崩潰。
-        * **Opt**: **語法更新** - 移除 `_get_websocket_headers` 等棄用警告，提升後台穩定性。
-        * **Opt**: **容錯增強** - 加強回測與下載過程中的錯誤捕捉，避免單一股票錯誤卡死進度。
+        * **Fix**: 快取自動修復，防止 KeyError。
+        * **Opt**: 容錯增強，減少因單一股票下載失敗導致的卡頓。
 
         ### Ver 3.23 (Filter Upgrade)
-        * **Mod**: 移除皇冠特選。
-        * **New**: 新增爆量起漲 (測試中) 與法人傳送門。
-
-        ### Ver 3.22 (Reboot Guide)
-        * **UI**: 顯示 Reboot App 教學。
-
-        ### Ver 3.21 (Anti-Zero Protection)
-        * **Fix**: 下載 0 檔時保留舊資料。
+        * **Mod**: 移除皇冠特選，新增爆量起漲 (測試中) 與法人傳送門。
         """)
 
 # 主畫面 - 回測報告
@@ -594,7 +569,6 @@ if st.session_state['backtest_result'] is not None:
     df_history = bt_df[bt_df['結果'] != "觀察中"].copy()
     df_watching = bt_df[bt_df['結果'] == "觀察中"].copy()
     
-    # 1. 關注中
     if not df_watching.empty:
         st.markdown(f"""
         <div style="background-color: #fff8dc; padding: 15px; border-radius: 10px; border: 2px solid #ffa500; margin-bottom: 20px;">
@@ -614,7 +588,6 @@ if st.session_state['backtest_result'] is not None:
     st.markdown("---")
     st.markdown("### 📜 歷史驗證數據 (已結算)")
 
-    # 2. 歷史數據
     if len(df_history) > 0:
         months = sorted(df_history['月份'].unique())
         tabs = st.tabs(["📊 總覽"] + months)
@@ -659,26 +632,20 @@ if st.session_state['master_df'] is not None:
         st.error("⚠️ 資料結構已更新！請點擊 **「🚨 強制重置系統」** 後重新下載。")
         st.stop()
 
-    # 基礎過濾
     df = df[df['成交量'] >= (min_vol_input * 1000)]
     
-    # 策略分流篩選
     if strategy_mode == "🔥 浴火重生 (假跌破)":
         df = df[df['浴火重生'] == True]
     else:
-        # 守護生命線
         df = df[df['abs_bias'] <= bias_threshold]
         if filter_trend_up: df = df[df['生命線趨勢'] == "⬆️向上"]
         elif filter_trend_down: df = df[df['生命線趨勢'] == "⬇️向下"]
         if filter_kd: df = df[df['K值'] > df['D值']]
     
-    # 一般出量過濾
     if filter_vol_double: 
         df = df[df['成交量'] > (df['昨日成交量'] * 1.5)]
     
-    # --- 新增過濾: 爆量起漲 (測試中) ---
     if filter_burst_vol:
-        # 🛡️ 再次檢查欄位，避免漏網之魚
         if '爆量起漲' in df.columns:
             df = df[df['爆量起漲'] == True]
         else:
@@ -696,11 +663,11 @@ if st.session_state['master_df'] is not None:
         
         df['成交量(張)'] = (df['成交量'] / 1000).astype(int)
         df['KD值'] = df.apply(lambda x: f"K:{int(x['K值'])} D:{int(x['D值'])}", axis=1)
-        
         df['選股標籤'] = df['代號'].astype(str) + " " + df['名稱'].astype(str)
         df['法人買賣?'] = df['代號'].apply(lambda x: f"https://tw.stock.yahoo.com/quote/{x}/institutional-trading")
 
-        display_cols = ['代號', '名稱', '收盤價', '生命線', '乖離率(%)', '位置', 'KD值', '成交量(張)', '法人買賣?']
+        # --- Ver 3.25: 新增 站上天數 欄位 ---
+        display_cols = ['代號', '名稱', '收盤價', '生命線', '站上天數', '乖離率(%)', 'KD值', '成交量(張)', '法人買賣?']
             
         df = df.sort_values(by='成交量', ascending=False)
         
@@ -715,7 +682,8 @@ if st.session_state['master_df'] is not None:
                 use_container_width=True, 
                 hide_index=True,
                 column_config={
-                    "法人買賣?": st.column_config.LinkColumn("🔍 查法人", display_text="前往查看")
+                    "法人買賣?": st.column_config.LinkColumn("🔍 查法人", display_text="前往查看"),
+                    "站上天數": st.column_config.NumberColumn("天數", help="連續站上生命線的天數")
                 }
             )
 
