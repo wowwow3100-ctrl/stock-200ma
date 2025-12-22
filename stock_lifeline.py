@@ -10,7 +10,7 @@ import uuid
 import csv
 
 # --- 1. 網頁設定 ---
-VER = "ver3.26 (Industry Added)"
+VER = "ver3.27 (De-Duplicate)"
 st.set_page_config(page_title=f"🍍 旺來-台股生命線({VER})", layout="wide")
 
 # --- 流量紀錄與後台功能 ---
@@ -65,15 +65,21 @@ def get_stock_list():
         otc = twstock.tpex
         stock_dict = {}
         exclude_industries = ['金融保險業', '存託憑證']
+        
+        # 上市
         for code, info in tse.items():
             if info.type == '股票':
                 if info.group not in exclude_industries:
-                    # 注意：這裡 info.group 就是產業類別
                     stock_dict[f"{code}.TW"] = {'name': info.name, 'code': code, 'group': info.group}
+        
+        # 上櫃
         for code, info in otc.items():
             if info.type == '股票':
                 if info.group not in exclude_industries:
-                    stock_dict[f"{code}.TWO"] = {'name': info.name, 'code': code, 'group': info.group}
+                    # 避免極少數轉上市櫃過渡期的重複，如果已存在則不覆蓋 (優先保留上市)
+                    key = f"{code}.TWO"
+                    if f"{code}.TW" not in stock_dict: 
+                        stock_dict[key] = {'name': info.name, 'code': code, 'group': info.group}
         return stock_dict
     except:
         return {}
@@ -135,11 +141,9 @@ def run_strategy_backtest(stock_dict, progress_bar, use_trend_up, use_treasure, 
                     ma200_series = ma200_df[ticker]
                     vol_ma5_series = vol_ma5_df[ticker]
                     
-                    # --- 取得個股資訊 (含產業) ---
                     stock_info = stock_dict.get(ticker, {})
                     stock_name = stock_info.get('name', ticker)
                     stock_industry = stock_info.get('group', '其他')
-                    # ---------------------------
 
                     total_len = len(c_series)
 
@@ -212,7 +216,7 @@ def run_strategy_backtest(stock_dict, progress_bar, use_trend_up, use_treasure, 
                                 '月份': '👀 關注中' if is_watching else month_str,
                                 '代號': ticker.replace(".TW", "").replace(".TWO", ""),
                                 '名稱': stock_name,
-                                '產業': stock_industry, # 新增產業欄位
+                                '產業': stock_industry,
                                 '訊號日期': date.strftime('%Y-%m-%d'),
                                 '訊號價': round(close_p, 2),
                                 '最高漲幅(%)': round(final_profit_pct, 2),
@@ -325,7 +329,6 @@ def fetch_all_data(stock_dict, progress_bar, status_text):
                                     break 
                         except:
                             streak_days = 0
-                        # ----------------------
 
                         stock_df = pd.DataFrame({'Close': df_c[ticker], 'High': df_h[ticker], 'Low': df_l[ticker]}).dropna()
                         k_val, d_val = 0, 0
@@ -336,13 +339,12 @@ def fetch_all_data(stock_dict, progress_bar, status_text):
                         stock_info = stock_dict.get(ticker)
                         if not stock_info: continue
 
-                        # ★★★ 取得產業資訊 ★★★
                         industry = stock_info.get('group', '其他')
 
                         raw_data_list.append({
                             '代號': stock_info['code'],
                             '名稱': stock_info['name'],
-                            '產業': industry, # 新增欄位
+                            '產業': industry, 
                             '完整代號': ticker,
                             '收盤價': float(price),
                             '生命線': float(ma200),
@@ -369,7 +371,12 @@ def fetch_all_data(stock_dict, progress_bar, status_text):
         progress_bar.progress(current_progress, text=f"系統正在努力挖掘寶藏中...({int(current_progress*100)}%)")
         time.sleep(0.3)
     
-    return pd.DataFrame(raw_data_list)
+    # ★★★ 修正重點：強制移除重複的股票代號 ★★★
+    df_result = pd.DataFrame(raw_data_list)
+    if not df_result.empty:
+        df_result = df_result.drop_duplicates(subset=['完整代號']) # 確保代號唯一
+    
+    return df_result
 
 def plot_stock_chart(ticker, name):
     try:
@@ -438,7 +445,7 @@ with st.sidebar:
                 df_cache['爆量起漲'] = False
             if '站上天數' not in df_cache.columns:
                 df_cache['站上天數'] = 0 
-            if '產業' not in df_cache.columns: # Ver 3.26 新增修復
+            if '產業' not in df_cache.columns:
                 df_cache['產業'] = "未知(請更新)"
                 
             st.session_state['master_df'] = df_cache
@@ -555,11 +562,11 @@ with st.sidebar:
         st.write(f"**🕒 系統最後重啟時間:** {datetime.now().strftime('%Y-%m-%d %H:%M')}")
         st.markdown("---")
         st.markdown("""
-        ### Ver 3.26 (Industry Added)
-        * **New**: **產業分類** - 在篩選列表與回測報告中新增「產業」欄位，一眼辨識族群性。
+        ### Ver 3.27 (De-Duplicate)
+        * **Fix**: **移除重複** - 修復股票列表可能出現重複項目的問題。
         
-        ### Ver 3.25 (Streak Counter)
-        * **New**: **站上天數** - 新增「連續站上生命線天數」欄位。
+        ### Ver 3.26 (Industry Added)
+        * **New**: **產業分類** - 在篩選列表與回測報告中新增「產業」欄位。
         """)
 
 # 主畫面 - 回測報告
@@ -610,7 +617,6 @@ if st.session_state['backtest_result'] is not None:
             col2.metric("獲利機率", f"{win_rate}%")
             col3.metric("平均損益(%)", f"{avg_max_ret}%")
             
-            # 回測總表加入產業欄位
             st.dataframe(df_history[['月份', '代號', '名稱', '產業', '訊號日期', '訊號價', '最高漲幅(%)', '結果']], use_container_width=True)
 
         for i, m in enumerate(months):
@@ -674,7 +680,6 @@ if st.session_state['master_df'] is not None:
         df['選股標籤'] = df['代號'].astype(str) + " " + df['名稱'].astype(str)
         df['法人買賣?'] = df['代號'].apply(lambda x: f"https://tw.stock.yahoo.com/quote/{x}/institutional-trading")
 
-        # --- Ver 3.26: 新增 產業 欄位 ---
         display_cols = ['代號', '名稱', '產業', '收盤價', '生命線', '站上天數', '乖離率(%)', 'KD值', '成交量(張)', '法人買賣?']
             
         df = df.sort_values(by='成交量', ascending=False)
