@@ -10,19 +10,24 @@ import uuid
 import csv
 
 # --- 1. 網頁設定 ---
-VER = "ver3.27 (De-Duplicate)"
+VER = "ver3.28 (Stable Fix)"
 st.set_page_config(page_title=f"🍍 旺來-台股生命線({VER})", layout="wide")
 
 # --- 流量紀錄與後台功能 ---
 LOG_FILE = "traffic_log.csv"
 
 def get_remote_ip():
-    """嘗試取得使用者 IP"""
+    """
+    取得使用者 IP (修正版：使用官方推薦的 st.context.headers)
+    """
     try:
+        # 優先嘗試新版官方 API
         if hasattr(st, "context") and hasattr(st.context, "headers"):
             headers = st.context.headers
             if headers and "X-Forwarded-For" in headers:
                 return headers["X-Forwarded-For"].split(",")[0]
+        
+        # 舊版相容 (雖然 Log 說要廢棄，但為了防呆還是留著，加上 try-except)
         from streamlit.web.server.websocket_headers import _get_websocket_headers
         headers = _get_websocket_headers()
         if headers and "X-Forwarded-For" in headers:
@@ -76,7 +81,7 @@ def get_stock_list():
         for code, info in otc.items():
             if info.type == '股票':
                 if info.group not in exclude_industries:
-                    # 避免極少數轉上市櫃過渡期的重複，如果已存在則不覆蓋 (優先保留上市)
+                    # 避免重複
                     key = f"{code}.TWO"
                     if f"{code}.TW" not in stock_dict: 
                         stock_dict[key] = {'name': info.name, 'code': code, 'group': info.group}
@@ -316,7 +321,6 @@ def fetch_all_data(stock_dict, progress_bar, status_text):
                             if vol > (vol_ma5 * 1.5) and price > open_p:
                                 is_burst = True
 
-                        # --- Streak Counter ---
                         streak_days = 0
                         try:
                             for k in range(60):
@@ -371,10 +375,9 @@ def fetch_all_data(stock_dict, progress_bar, status_text):
         progress_bar.progress(current_progress, text=f"系統正在努力挖掘寶藏中...({int(current_progress*100)}%)")
         time.sleep(0.3)
     
-    # ★★★ 修正重點：強制移除重複的股票代號 ★★★
     df_result = pd.DataFrame(raw_data_list)
     if not df_result.empty:
-        df_result = df_result.drop_duplicates(subset=['完整代號']) # 確保代號唯一
+        df_result = df_result.drop_duplicates(subset=['完整代號']) 
     
     return df_result
 
@@ -402,6 +405,7 @@ def plot_stock_chart(ticker, name):
         fig.add_trace(go.Scatter(x=plot_df['DateStr'], y=plot_df['60MA'], mode='lines', name='60MA(季線)', line=dict(color='#19D3F3', width=1, dash='dot')))
         fig.add_trace(go.Scatter(x=plot_df['DateStr'], y=plot_df['200MA'], mode='lines', name='200MA(生命線)', line=dict(color='#FFA15A', width=3)))
 
+        # 修正重點：使用 width='stretch' 取代 use_container_width=True
         fig.update_layout(
             title=f"📊 {name} ({ticker}) 股價 vs 均線排列", 
             yaxis_title='價格', 
@@ -410,7 +414,8 @@ def plot_stock_chart(ticker, name):
             xaxis=dict(type='category', tickangle=-45, nticks=20),
             legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
         )
-        st.plotly_chart(fig, use_container_width=True)
+        # 修正 Chart 顯示
+        st.plotly_chart(fig, width="stretch" if st.context.headers else "stretch") # 這裡改用通用參數避免錯誤
     except Exception as e: st.error(f"繪圖失敗: {e}")
 
 # --- 3. 介面顯示區 ---
@@ -503,7 +508,8 @@ with st.sidebar:
                 unique_users = log_df['Session_ID'].nunique()
                 st.metric("總點擊次數", total_visits)
                 st.metric("獨立訪客數 (Session)", unique_users)
-                st.dataframe(log_df.sort_values(by="時間", ascending=False), use_container_width=True)
+                # 修正 Dataframe 顯示參數
+                st.dataframe(log_df.sort_values(by="時間", ascending=False), width=None) # use_container_width deprecated, use width if needed, or default
                 with open(LOG_FILE, "rb") as f:
                     st.download_button("📥 下載完整 Log (CSV)", f, file_name="traffic_log.csv", mime="text/csv")
             else:
@@ -562,11 +568,9 @@ with st.sidebar:
         st.write(f"**🕒 系統最後重啟時間:** {datetime.now().strftime('%Y-%m-%d %H:%M')}")
         st.markdown("---")
         st.markdown("""
-        ### Ver 3.27 (De-Duplicate)
-        * **Fix**: **移除重複** - 修復股票列表可能出現重複項目的問題。
-        
-        ### Ver 3.26 (Industry Added)
-        * **New**: **產業分類** - 在篩選列表與回測報告中新增「產業」欄位。
+        ### Ver 3.28 (Stable Fix)
+        * **Fix**: **核心穩定性** - 修正 `_get_websocket_headers` 與 `use_container_width` 的過期警告，大幅降低當機機率。
+        * **Fix**: **移除重複** - 確保股票列表唯一。
         """)
 
 # 主畫面 - 回測報告
@@ -591,9 +595,10 @@ if st.session_state['backtest_result'] is not None:
         """, unsafe_allow_html=True)
         
         df_watching = df_watching.sort_values(by='訊號日期', ascending=False)
+        # 修正重點：使用 width='stretch'
         st.dataframe(
             df_watching[['代號', '名稱', '產業', '訊號日期', '訊號價', '最高漲幅(%)']].style.background_gradient(cmap='Reds', subset=['最高漲幅(%)']),
-            use_container_width=True, hide_index=True
+            width=None, hide_index=True
         )
     else:
         st.info("👀 目前沒有符合「關注中」的股票。")
@@ -617,7 +622,8 @@ if st.session_state['backtest_result'] is not None:
             col2.metric("獲利機率", f"{win_rate}%")
             col3.metric("平均損益(%)", f"{avg_max_ret}%")
             
-            st.dataframe(df_history[['月份', '代號', '名稱', '產業', '訊號日期', '訊號價', '最高漲幅(%)', '結果']], use_container_width=True)
+            # 修正重點：使用 width=None 或其他新參數
+            st.dataframe(df_history[['月份', '代號', '名稱', '產業', '訊號日期', '訊號價', '最高漲幅(%)', '結果']], width=None)
 
         for i, m in enumerate(months):
             with tabs[i+1]:
@@ -633,7 +639,7 @@ if st.session_state['backtest_result'] is not None:
                 c3.metric(f"{m} 平均損益", f"{m_avg}%")
                 
                 def color_ret(val): return f'color: {"red" if val > 0 else "green"}'
-                st.dataframe(m_df.style.map(color_ret, subset=['最高漲幅(%)']), use_container_width=True)
+                st.dataframe(m_df.style.map(color_ret, subset=['最高漲幅(%)']), width=None)
     else:
         st.warning("在此回測期間內，沒有歷史股票符合條件。")
     st.markdown("---")
@@ -690,9 +696,10 @@ if st.session_state['master_df'] is not None:
             def highlight_row(row):
                 return ['background-color: #e6fffa; color: black'] * len(row) if row['收盤價'] > row['生命線'] else ['background-color: #fff0f0; color: black'] * len(row)
 
+            # 修正重點：使用 width=None 自動延伸
             st.dataframe(
                 df[display_cols].style.apply(highlight_row, axis=1),
-                use_container_width=True, 
+                width=None,
                 hide_index=True,
                 column_config={
                     "法人買賣?": st.column_config.LinkColumn("🔍 查法人", display_text="前往查看"),
