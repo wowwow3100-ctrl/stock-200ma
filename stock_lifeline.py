@@ -460,7 +460,7 @@ with st.sidebar:
         except Exception as e:
             st.error(f"讀取快取失敗: {e}")
 
-    if st.button("🔄 下載最新股價 (開市用)", type="primary"):
+    if st.button("🔄 下載最新股價 (如果登入時就有資料代表已經有人按過，不須再按)(", type="primary"):
         stock_dict = get_stock_list()
         if not stock_dict:
             st.error("無法取得股票清單，請稍後再試或按上方重置按鈕。")
@@ -731,3 +731,4 @@ else:
             with sub_c2: st.image("welcome.jpg", width=180)
         else:
             st.info("💡 尚未偵測到 welcome.jpg")
+
