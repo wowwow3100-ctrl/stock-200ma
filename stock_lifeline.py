@@ -11,7 +11,7 @@ import uuid
 import csv
 
 # --- 1. 網頁設定 ---
-VER = "ver4.2 (Stable/Weekly)"
+VER = "ver4.3 (Sync Fix)"
 st.set_page_config(page_title=f"🍍 旺來-台股生命線({VER})", layout="wide")
 
 # --- 流量紀錄與後台功能 ---
@@ -100,9 +100,10 @@ def calculate_kd_values(df, n=9):
         return 50, 50
 
 # --- 更新功能：週報掃描 (Tab 3 新兵戰果驗收) ---
-def scan_period_signals(stock_dict, days_lookback, progress_bar, min_vol):
+def scan_period_signals(stock_dict, days_lookback, progress_bar, min_vol, bias_thresh, strategy_type):
     """
     掃描過去 N 天內符合條件的股票，並計算持有至今的績效
+    (已修正：同步側邊欄策略與參數)
     """
     results = []
     all_tickers = list(stock_dict.keys())
@@ -165,14 +166,34 @@ def scan_period_signals(stock_dict, days_lookback, progress_bar, min_vol):
                         ma200_val = ma200_series.iloc[day_idx]
                         vol = v_series.iloc[day_idx]
                         
-                        # 過濾條件
+                        # 1. 基礎過濾
                         if vol < (min_vol * 1000) or pd.isna(ma200_val) or ma200_val == 0: continue
                         
-                        # 核心邏輯：股價在生命線附近，且站上 (乖離率小)
-                        bias = (close_p - ma200_val) / ma200_val * 100
+                        is_signal = False
                         
-                        if close_p > ma200_val and bias < 3.5:
-                            
+                        # 2. 策略判斷
+                        if strategy_type == "🛡️ 守護生命線 (反彈/支撐)":
+                            # 條件：收盤 > 生命線 且 乖離率 <= 設定值 (通常找正乖離小的)
+                            bias = (close_p - ma200_val) / ma200_val * 100
+                            # 守護生命線通常是指：站上且不遠 (正乖離範圍內)
+                            if close_p > ma200_val and 0 < bias <= bias_thresh:
+                                is_signal = True
+                                
+                        elif strategy_type == "🔥 浴火重生 (假跌破)":
+                            # 條件：今日站上，但過去7天內曾經跌破
+                            start_check = day_idx - 7
+                            if start_check >= 0:
+                                subset_c = c_series.iloc[start_check : day_idx+1]
+                                subset_ma = ma200_series.iloc[start_check : day_idx+1]
+                                if len(subset_c) >= 8:
+                                    cond_today_up = subset_c.iloc[-1] > subset_ma.iloc[-1]
+                                    past_c = subset_c.iloc[:-1]
+                                    past_ma = subset_ma.iloc[:-1]
+                                    cond_past_down = (past_c < past_ma).any()
+                                    if cond_today_up and cond_past_down:
+                                        is_signal = True
+
+                        if is_signal:
                             # 計算績效
                             profit_pct = (current_price - close_p) / close_p * 100
                             
@@ -236,7 +257,7 @@ def run_strategy_backtest(stock_dict, progress_bar, use_trend_up, use_treasure, 
 
             ma200_df = df_c.rolling(window=200).mean()
             vol_ma5_df = df_v.rolling(window=5).mean()
-            scan_window = df_c.index[-120:] # 改為掃描過去半年左右，讓週報資料豐富一點
+            scan_window = df_c.index[-120:] # 掃描過去半年
             
             for ticker in df_c.columns:
                 try:
@@ -654,11 +675,9 @@ with st.sidebar:
         st.write(f"**🕒 系統最後重啟時間:** {datetime.now().strftime('%Y-%m-%d %H:%M')}")
         st.markdown("---")
         st.markdown("""
-        ### Ver 4.2 (Stable/Weekly)
-        * **Fix**: 修復 Plotly 繪圖錯誤，強化相容性。
-        * **Flow**: 策略回測前強制檢查資料庫狀態，避免空值錯誤。
-        * **Admin**: 將管理員介面移至底部，操作更直覺。
-        * **New**: 策略回測報告新增「週報戰情圖」，直觀展示每週戰果。
+        ### Ver 4.3 (Sync Fix)
+        * **Fix**: **戰情室掃描修復** - 解決「週報戰情室」抓不到股票的問題。現在掃描會同步側邊欄的策略選擇與乖離率設定，不再使用寫死的 3.5% 標準。
+        * **Fix**: 繪圖相容性優化 (Plotly)。
         """)
     
     # --- 移動至最後的 Admin 區塊 ---
@@ -691,8 +710,7 @@ if st.session_state['backtest_result'] is not None:
     
     st.subheader(f"🧪 策略回測報告：{s_name}")
     
-    # 2. 新增備註說明，讓改版有感
-    st.caption("📝 (v4.2 新功能已整合：自動產出週報戰情圖，請見下方)")
+    st.caption("📝 (v4.3 修正：已同步您的篩選條件，回測數據更精準)")
 
     # 確保訊號日期是 datetime
     bt_df['訊號日期'] = pd.to_datetime(bt_df['訊號日期'])
@@ -917,7 +935,16 @@ if st.session_state['master_df'] is not None:
                     st.error("請先進行「下載最新股價」以獲取股票清單。")
                 else:
                     scan_progress = st.progress(0, text="戰情室連線中...")
-                    df_scan = scan_period_signals(stock_dict_scan, 5, scan_progress, min_vol_input)
+                    
+                    # 4.3 修正：這裡將 bias_threshold 與 strategy_mode 傳入，確保邏輯一致
+                    df_scan = scan_period_signals(
+                        stock_dict_scan, 
+                        5, 
+                        scan_progress, 
+                        min_vol_input,
+                        bias_threshold,
+                        strategy_mode
+                    )
                     scan_progress.empty()
                     
                     if not df_scan.empty:
