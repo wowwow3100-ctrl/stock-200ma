@@ -10,7 +10,7 @@ import uuid
 import csv
 
 # --- 1. 網頁設定 ---
-VER = "ver3.30 (Weekly Report)"
+VER = "ver3.31 (Syntax Fix)"
 st.set_page_config(page_title=f"🍍 旺來-台股生命線({VER})", layout="wide")
 
 # --- 流量紀錄與後台功能 ---
@@ -660,9 +660,9 @@ with st.sidebar:
         st.write(f"**🕒 系統最後重啟時間:** {datetime.now().strftime('%Y-%m-%d %H:%M')}")
         st.markdown("---")
         st.markdown("""
-        ### Ver 3.30 (Weekly Report)
-        * **New**: **週報功能 (Weekly Scan)** - 新增「🗓️ 本週訊號補漏」分頁，可掃描過去 5 天符合條件的個股，並顯示至今漲跌幅。
-        * **Fix**: **完整代碼整合** - 修復前版本代碼截斷問題，提供一鍵複製。
+        ### Ver 3.31 (Syntax Fix)
+        * **Fix**: **語法錯誤修正** - 修復 `if st.session_state['master_df'] is not None:` 缺少的判斷式與冒號。
+        * **New**: **週報功能 (Weekly Report)** - 掃描過去 5 日訊號。
         """)
 
 # 主畫面 - 回測報告
@@ -735,4 +735,128 @@ if st.session_state['backtest_result'] is not None:
     st.markdown("---")
 
 # 主畫面 - 日常篩選
-if st.session_state['master_df']
+if st.session_state['master_df'] is not None:
+    df = st.session_state['master_df'].copy()
+    
+    if '生命線' not in df.columns:
+        st.error("⚠️ 資料結構已更新！請點擊 **「🚨 強制重置系統」** 後重新下載。")
+        st.stop()
+
+    df = df[df['成交量'] >= (min_vol_input * 1000)]
+    
+    if strategy_mode == "🔥 浴火重生 (假跌破)":
+        df = df[df['浴火重生'] == True]
+    else:
+        df = df[df['abs_bias'] <= bias_threshold]
+        if filter_trend_up: df = df[df['生命線趨勢'] == "⬆️向上"]
+        elif filter_trend_down: df = df[df['生命線趨勢'] == "⬇️向下"]
+        if filter_kd: df = df[df['K值'] > df['D值']]
+    
+    if filter_vol_double: 
+        df = df[df['成交量'] > (df['昨日成交量'] * 1.5)]
+    
+    if filter_burst_vol:
+        if '爆量起漲' in df.columns:
+            df = df[df['爆量起漲'] == True]
+        else:
+            st.warning("⚠️ 目前資料版本較舊，不支援「爆量起漲」篩選。請執行更新。")
+        
+    if len(df) == 0:
+        st.warning(f"⚠️ 找不到符合條件的股票！")
+    else:
+        st.markdown(f"""
+        <div style="background-color: #f0f2f6; padding: 15px; border-radius: 10px; text-align: center; border: 2px solid #ff4b4b;">
+            <h2 style="color: #333; margin:0;">🔍 根據【{strategy_mode}】，共篩選出 <span style="color: #ff4b4b; font-size: 1.5em;">{len(df)}</span> 檔股票</h2>
+        </div>
+        <br>
+        """, unsafe_allow_html=True)
+        
+        df['成交量(張)'] = (df['成交量'] / 1000).astype(int)
+        df['KD值'] = df.apply(lambda x: f"K:{int(x['K值'])} D:{int(x['D值'])}", axis=1)
+        df['選股標籤'] = df['代號'].astype(str) + " " + df['名稱'].astype(str)
+        df['法人買賣?'] = df['代號'].apply(lambda x: f"https://tw.stock.yahoo.com/quote/{x}/institutional-trading")
+
+        display_cols = ['代號', '名稱', '產業', '收盤價', '生命線', '站上天數', '乖離率(%)', 'KD值', '成交量(張)', '法人買賣?']
+            
+        df = df.sort_values(by='成交量', ascending=False)
+        
+        # --- TABs 修改區 (新增 Tab 3) ---
+        tab1, tab2, tab3 = st.tabs(["📋 今日篩選結果", "📊 個股趨勢圖", "🗓️ 本週訊號補漏 (週報)"])
+        
+        with tab1:
+            def highlight_row(row):
+                return ['background-color: #e6fffa; color: black'] * len(row) if row['收盤價'] > row['生命線'] else ['background-color: #fff0f0; color: black'] * len(row)
+
+            st.dataframe(
+                df[display_cols].style.apply(highlight_row, axis=1),
+                use_container_width=True, 
+                hide_index=True,
+                column_config={
+                    "法人買賣?": st.column_config.LinkColumn("🔍 查法人", display_text="前往查看"),
+                    "站上天數": st.column_config.NumberColumn("天數", help="連續站上生命線的天數")
+                }
+            )
+
+        with tab2:
+            st.markdown("### 🔍 個股趨勢圖")
+            if len(df) > 0:
+                selected_stock_label = st.selectbox("請選擇一檔股票：", df['選股標籤'].tolist())
+                selected_row = df[df['選股標籤'] == selected_stock_label].iloc[0]
+                plot_stock_chart(selected_row['完整代號'], selected_row['名稱'])
+                
+                c1, c2, c3 = st.columns(3)
+                c1.metric("收盤價", f"{selected_row['收盤價']:.2f}")
+                c2.metric("成交量", f"{selected_row['成交量(張)']} 張")
+                c3.metric("KD", selected_row['KD值'])
+
+        # --- 新增的 Tab 3 內容 ---
+        with tab3:
+            st.markdown("### 🗓️ 週報：補捉漏網之魚")
+            st.info("此功能會掃描 **過去 5 個交易日** 曾出現「站上生命線 (起漲訊號)」但可能被我們錯過的股票。")
+            
+            col_scan1, col_scan2 = st.columns([1, 3])
+            with col_scan1:
+                run_scan = st.button("🚀 開始掃描本週訊號", type="primary")
+            
+            if run_scan:
+                stock_dict_scan = get_stock_list()
+                if not stock_dict_scan:
+                    st.error("請先進行「下載最新股價」以獲取股票清單。")
+                else:
+                    scan_progress = st.progress(0, text="準備時光機...")
+                    # 呼叫新函式，掃描 5 天
+                    df_scan = scan_period_signals(stock_dict_scan, 5, scan_progress, min_vol_input)
+                    scan_progress.empty()
+                    
+                    if not df_scan.empty:
+                        st.success(f"掃描完成！發現 {len(df_scan)} 個訊號點。")
+                        
+                        # 整理資料
+                        df_scan = df_scan.sort_values(by=['訊號日期', '至今漲跌(%)'], ascending=[False, False])
+                        
+                        st.dataframe(
+                            df_scan.style.background_gradient(cmap='RdYlGn', subset=['至今漲跌(%)'], vmin=-5, vmax=10),
+                            use_container_width=True,
+                            column_config={
+                                "至今漲跌(%)": st.column_config.NumberColumn(
+                                    "至今表現",
+                                    help="從訊號出現當天收盤價持有至今的漲跌幅",
+                                    format="%.2f %%"
+                                )
+                            }
+                        )
+                    else:
+                        st.warning("過去 5 天內沒有發現符合「剛站上生命線」的股票 (或者成交量不足)。")
+
+else:
+    st.warning("👈 請先點擊左側 sidebar 的 **「🔄 下載最新股價」** 按鈕開始挖寶！")
+    
+    col1, col2, col3 = st.columns([1, 2, 1])
+    with col2:
+        if os.path.exists("welcome.jpg"):
+            st.markdown("""<div style="text-align: center; font-size: 1.1em; margin-bottom: 20px;">
+                這是數年來的經驗收納<br>此工具僅供參考，不代表投資建議<br>預祝心想事成，從從容容，紫氣東來! 🟣✨</div>""", unsafe_allow_html=True)
+            sub_c1, sub_c2, sub_c3 = st.columns([1, 1, 1])
+            with sub_c2: st.image("welcome.jpg", width=180)
+        else:
+            st.info("💡 尚未偵測到 welcome.jpg")
