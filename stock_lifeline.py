@@ -5,28 +5,26 @@ import twstock
 import time
 from datetime import datetime, timedelta
 import plotly.graph_objects as go
+import plotly.express as px  # 新增：用於繪製氣泡圖
 import os
 import uuid
 import csv
 
 # --- 1. 網頁設定 ---
-VER = "ver3.31 (Syntax Fix)"
+VER = "ver3.4 (Weekly Report)"
 st.set_page_config(page_title=f"🍍 旺來-台股生命線({VER})", layout="wide")
 
 # --- 流量紀錄與後台功能 ---
 LOG_FILE = "traffic_log.csv"
 
 def get_remote_ip():
-    """
-    取得使用者 IP (優先嘗試新版官方 API)
-    """
+    """取得使用者 IP"""
     try:
         if hasattr(st, "context") and hasattr(st.context, "headers"):
             headers = st.context.headers
             if headers and "X-Forwarded-For" in headers:
                 return headers["X-Forwarded-For"].split(",")[0]
         
-        # 舊版相容
         from streamlit.web.server.websocket_headers import _get_websocket_headers
         headers = _get_websocket_headers()
         if headers and "X-Forwarded-For" in headers:
@@ -80,7 +78,6 @@ def get_stock_list():
         for code, info in otc.items():
             if info.type == '股票':
                 if info.group not in exclude_industries:
-                    # 避免重複
                     key = f"{code}.TWO"
                     if f"{code}.TW" not in stock_dict: 
                         stock_dict[key] = {'name': info.name, 'code': code, 'group': info.group}
@@ -102,34 +99,42 @@ def calculate_kd_values(df, n=9):
     except:
         return 50, 50
 
-# --- 新增功能：週報掃描 (補捉過去幾天的訊號) ---
+# --- 更新功能：週報掃描 (新兵戰果驗收) ---
 def scan_period_signals(stock_dict, days_lookback, progress_bar, min_vol):
     """
-    掃描過去 N 天內符合條件的股票 (補捉漏網之魚)
+    掃描過去 N 天內符合條件的股票，並計算持有至今的績效
     """
     results = []
     all_tickers = list(stock_dict.keys())
     BATCH_SIZE = 50 
     total_batches = (len(all_tickers) // BATCH_SIZE) + 1
     
+    # 內部小工具：計算連續站穩天數
+    def calculate_streak(ma_series, close_series, start_idx):
+        streak = 0
+        # 從訊號隔天開始算，直到今天
+        for k in range(start_idx + 1, len(close_series)):
+            if close_series.iloc[k] > ma_series.iloc[k]:
+                streak += 1
+            else:
+                streak = 0 # 跌破即中斷
+        return streak
+
     for i, batch_idx in enumerate(range(0, len(all_tickers), BATCH_SIZE)):
         batch = all_tickers[batch_idx : batch_idx + BATCH_SIZE]
         try:
-            # 下載較短區間即可 (3個月夠計算均線)
-            data = yf.download(batch, period="3mo", interval="1d", progress=False, auto_adjust=False)
+            # 下載資料 (抓稍微長一點以計算 MA)
+            data = yf.download(batch, period="6mo", interval="1d", progress=False, auto_adjust=False)
             if data.empty: continue
             
-            # 處理 MultiIndex
             try:
                 df_c = data['Close']
                 df_v = data['Volume']
-                df_o = data['Open']
             except KeyError: continue
 
             if isinstance(df_c, pd.Series):
                 df_c = df_c.to_frame(name=batch[0])
                 df_v = df_v.to_frame(name=batch[0])
-                df_o = df_o.to_frame(name=batch[0])
 
             ma200_df = df_c.rolling(window=200).mean()
             
@@ -144,57 +149,59 @@ def scan_period_signals(stock_dict, days_lookback, progress_bar, min_vol):
                     
                     stock_info = stock_dict.get(ticker, {})
                     name = stock_info.get('name', ticker)
-                    industry = stock_info.get('group', '其他')
+                    
+                    # 取得最後一天的價格 (做為結算價)
+                    current_price = c_series.iloc[-1]
                     
                     # 倒帶檢查過去 N 天
-                    for day_idx in range(days_lookback):
-                        # 0 是今天(或最新交易日), 1 是昨天...
-                        current_pos = -1 - day_idx
+                    start_scan_idx = len(c_series) - 1 # 今天
+                    
+                    for lookback in range(days_lookback):
+                        day_idx = start_scan_idx - lookback 
+                        if day_idx < 200: break
                         
-                        # 邊界檢查
-                        if abs(current_pos) > len(c_series): break
+                        date = c_series.index[day_idx]
+                        close_p = c_series.iloc[day_idx]
+                        ma200_val = ma200_series.iloc[day_idx]
+                        vol = v_series.iloc[day_idx]
                         
-                        date = c_series.index[current_pos]
-                        close_p = c_series.iloc[current_pos]
-                        ma200_val = ma200_series.iloc[current_pos]
-                        vol = v_series.iloc[current_pos]
-                        
-                        # 1. 基本過濾: 成交量 & 有效均線
+                        # 過濾條件
                         if vol < (min_vol * 1000) or pd.isna(ma200_val) or ma200_val == 0: continue
                         
-                        # 2. 判斷條件: 站上生命線 (且乖離率不大)
+                        # 核心邏輯：股價在生命線附近，且站上 (乖離率小)
                         bias = (close_p - ma200_val) / ma200_val * 100
                         
                         if close_p > ma200_val and bias < 3.5:
-                            # 進階：前一天是否在線下? (確認是起漲點)
-                            prev_pos = current_pos - 1
-                            prev_close = c_series.iloc[prev_pos]
-                            prev_ma = ma200_series.iloc[prev_pos]
                             
-                            is_cross_up = prev_close < prev_ma
+                            # 計算績效
+                            profit_pct = (current_price - close_p) / close_p * 100
                             
-                            if is_cross_up:
-                                # 計算至今漲跌
-                                latest_price = c_series.iloc[-1]
-                                performance = (latest_price - close_p) / close_p * 100
-                                
-                                results.append({
-                                    '訊號日期': date.strftime('%Y-%m-%d'),
-                                    '代號': ticker.replace(".TW", "").replace(".TWO", ""),
-                                    '名稱': name,
-                                    '產業': industry,
-                                    '訊號價': round(close_p, 2),
-                                    '現價': round(latest_price, 2),
-                                    '至今漲跌(%)': round(performance, 2),
-                                    '距今': f"{day_idx} 天前"
-                                })
+                            # 計算這天之後連續站上幾天 (Durability)
+                            streak_days = calculate_streak(ma200_series, c_series, day_idx)
+                            
+                            status = "🟢 獲利中" if profit_pct > 0 else "🔴 虧損中"
+                            if current_price < ma200_series.iloc[-1]:
+                                status = "💀 已跌破"
+
+                            results.append({
+                                '訊號日期': date.strftime('%Y-%m-%d'),
+                                '距今天數': f"{lookback} 天前",
+                                '代號': ticker.replace(".TW", "").replace(".TWO", ""),
+                                '名稱': name,
+                                '訊號價': round(close_p, 2),
+                                '現價': round(current_price, 2),
+                                '至今漲跌(%)': round(profit_pct, 2),
+                                '成交量': int(vol),
+                                '站穩天數': streak_days,
+                                '狀態': status
+                            })
                 except: continue
         except: continue
         
         # 更新進度條
         prog = (i + 1) / total_batches
-        progress_bar.progress(prog, text=f"正在製作週報...掃描中...({int(prog*100)}%)")
-        time.sleep(0.05)
+        progress_bar.progress(prog, text=f"正在調閱戰情資料...({int(prog*100)}%)")
+        time.sleep(0.02)
 
     return pd.DataFrame(results)
 
@@ -660,9 +667,10 @@ with st.sidebar:
         st.write(f"**🕒 系統最後重啟時間:** {datetime.now().strftime('%Y-%m-%d %H:%M')}")
         st.markdown("---")
         st.markdown("""
-        ### Ver 3.31 (Syntax Fix)
-        * **Fix**: **語法錯誤修正** - 修復 `if st.session_state['master_df'] is not None:` 缺少的判斷式與冒號。
-        * **New**: **週報功能 (Weekly Report)** - 掃描過去 5 日訊號。
+        ### Ver 3.4 (Weekly Report)
+        * **New**: **週報戰情室** - 新增 Tab3，可以看見過去 5 日訊號的持有表現。
+        * **New**: **氣泡戰果圖** - 用 Plotly 繪製，大小代表成交量，顏色代表損益，直覺檢視強弱。
+        * **UI**: 列表改用進度條 (Progress Bar) 顯示漲跌幅。
         """)
 
 # 主畫面 - 回測報告
@@ -780,8 +788,8 @@ if st.session_state['master_df'] is not None:
             
         df = df.sort_values(by='成交量', ascending=False)
         
-        # --- TABs 修改區 (新增 Tab 3) ---
-        tab1, tab2, tab3 = st.tabs(["📋 今日篩選結果", "📊 個股趨勢圖", "🗓️ 本週訊號補漏 (週報)"])
+        # --- TABs 修改區 ---
+        tab1, tab2, tab3 = st.tabs(["📋 今日篩選結果", "📊 個股趨勢圖", "🗓️ 本週訊號戰情室"])
         
         with tab1:
             def highlight_row(row):
@@ -809,44 +817,80 @@ if st.session_state['master_df'] is not None:
                 c2.metric("成交量", f"{selected_row['成交量(張)']} 張")
                 c3.metric("KD", selected_row['KD值'])
 
-        # --- 新增的 Tab 3 內容 ---
+        # --- 新增的 Tab 3 內容 (更新版) ---
         with tab3:
-            st.markdown("### 🗓️ 週報：補捉漏網之魚")
-            st.info("此功能會掃描 **過去 5 個交易日** 曾出現「站上生命線 (起漲訊號)」但可能被我們錯過的股票。")
+            st.markdown("### 🗓️ 週報戰情室：近期訊號追蹤")
+            st.info("這裡展示過去 5 個交易日曾出現過訊號的股票，以及它們**持有到今天**的表現。")
             
-            col_scan1, col_scan2 = st.columns([1, 3])
+            col_scan1, col_scan2 = st.columns([1, 4])
             with col_scan1:
-                run_scan = st.button("🚀 開始掃描本週訊號", type="primary")
+                run_scan = st.button("🚀 分析近 5 日戰果", type="primary")
             
             if run_scan:
                 stock_dict_scan = get_stock_list()
                 if not stock_dict_scan:
                     st.error("請先進行「下載最新股價」以獲取股票清單。")
                 else:
-                    scan_progress = st.progress(0, text="準備時光機...")
-                    # 呼叫新函式，掃描 5 天
+                    scan_progress = st.progress(0, text="戰情室連線中...")
                     df_scan = scan_period_signals(stock_dict_scan, 5, scan_progress, min_vol_input)
                     scan_progress.empty()
                     
                     if not df_scan.empty:
-                        st.success(f"掃描完成！發現 {len(df_scan)} 個訊號點。")
-                        
-                        # 整理資料
+                        # 依照日期分組，這裡我們先依日期和漲跌排序
                         df_scan = df_scan.sort_values(by=['訊號日期', '至今漲跌(%)'], ascending=[False, False])
                         
-                        st.dataframe(
-                            df_scan.style.background_gradient(cmap='RdYlGn', subset=['至今漲跌(%)'], vmin=-5, vmax=10),
-                            use_container_width=True,
-                            column_config={
-                                "至今漲跌(%)": st.column_config.NumberColumn(
-                                    "至今表現",
-                                    help="從訊號出現當天收盤價持有至今的漲跌幅",
-                                    format="%.2f %%"
-                                )
-                            }
+                        # --- 1. 戰果氣泡圖 (Visual) ---
+                        st.markdown("#### 📊 戰場分佈圖 (越右上方越強)")
+                        
+                        df_scan['表現'] = df_scan['至今漲跌(%)'].apply(lambda x: '漲' if x > 0 else '跌')
+                        color_map = {'漲': '#ff4b4b', '跌': '#00CC96'} 
+                        
+                        fig = px.scatter(
+                            df_scan,
+                            x="訊號日期",
+                            y="至今漲跌(%)",
+                            size="成交量",
+                            color="表現",
+                            color_discrete_map=color_map,
+                            hover_name="名稱",
+                            hover_data=["代號", "訊號價", "現價", "站穩天數"],
+                            height=400,
+                            size_max=50 
                         )
+                        fig.add_hline(y=0, line_dash="dash", line_color="gray", annotation_text="成本線")
+                        st.plotly_chart(fig, use_container_width=True)
+
+                        # --- 2. 詳細數據表 (Data) ---
+                        st.markdown("#### 📝 每日戰報清單")
+                        
+                        unique_dates = sorted(df_scan['訊號日期'].unique(), reverse=True)
+                        
+                        for d in unique_dates:
+                            day_data = df_scan[df_scan['訊號日期'] == d]
+                            win_count = len(day_data[day_data['至今漲跌(%)'] > 0])
+                            win_rate = int((win_count / len(day_data)) * 100)
+                            
+                            with st.expander(f"📅 {d} (當日訊號數: {len(day_data)} | 目前勝率: {win_rate}%)", expanded=True):
+                                st.dataframe(
+                                    day_data[['代號', '名稱', '訊號價', '現價', '至今漲跌(%)', '站穩天數', '狀態']],
+                                    use_container_width=True,
+                                    column_config={
+                                        "至今漲跌(%)": st.column_config.ProgressColumn(
+                                            "損益表現",
+                                            help="紅色代表賺錢，綠色代表虧損",
+                                            format="%.2f%%",
+                                            min_value=-10,
+                                            max_value=10,
+                                        ),
+                                        "站穩天數": st.column_config.NumberColumn(
+                                            "續航力 (天)",
+                                            help="訊號出現後，連續站穩生命線的天數"
+                                        )
+                                    },
+                                    hide_index=True
+                                )
                     else:
-                        st.warning("過去 5 天內沒有發現符合「剛站上生命線」的股票 (或者成交量不足)。")
+                        st.warning("過去 5 天內沒有發現符合訊號的股票。")
 
 else:
     st.warning("👈 請先點擊左側 sidebar 的 **「🔄 下載最新股價」** 按鈕開始挖寶！")
@@ -859,4 +903,4 @@ else:
             sub_c1, sub_c2, sub_c3 = st.columns([1, 1, 1])
             with sub_c2: st.image("welcome.jpg", width=180)
         else:
-            st.info("💡 尚未偵測到 welcome.jpg")
+            st.info("💡 尚未偵測到 welcome.jpg，但不影響功能。")
