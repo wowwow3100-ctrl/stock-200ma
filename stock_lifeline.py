@@ -11,7 +11,7 @@ import uuid
 import csv
 
 # --- 1. 網頁設定 ---
-VER = "ver4.5 (Anti-Block & Fixes)"
+VER = "ver4.6 (Final Polish)"
 st.set_page_config(page_title=f"🍍 旺來-台股生命線({VER})", layout="wide")
 
 # --- 時間校正工具 (UTC+8) ---
@@ -123,7 +123,7 @@ def scan_period_signals(stock_dict, days_lookback, progress_bar, min_vol, bias_t
     """
     results = []
     all_tickers = list(stock_dict.keys())
-    BATCH_SIZE = 30 # 稍微降低
+    BATCH_SIZE = 30 # 維持較低 Batch 防止阻擋
     total_batches = (len(all_tickers) // BATCH_SIZE) + 1
     
     # 內部小工具：計算連續站穩天數
@@ -221,10 +221,9 @@ def scan_period_signals(stock_dict, days_lookback, progress_bar, min_vol, bias_t
                             break
                 except: continue
         except: 
-            time.sleep(1) # 遇到錯誤稍作休息
+            time.sleep(1) 
             continue
         
-        # 增加休息時間，避免被擋
         time.sleep(1) 
         prog = (i + 1) / total_batches
         progress_bar.progress(prog, text=f"正在編制本週戰報...({int(prog*100)}%)")
@@ -235,7 +234,7 @@ def scan_period_signals(stock_dict, days_lookback, progress_bar, min_vol, bias_t
 def run_strategy_backtest(stock_dict, progress_bar, use_trend_up, use_treasure, use_vol, min_vol_threshold, use_burst_vol):
     results = []
     all_tickers = list(stock_dict.keys())
-    BATCH_SIZE = 30 # 降低批次量
+    BATCH_SIZE = 30 
     total_batches = (len(all_tickers) // BATCH_SIZE) + 1
     OBSERVE_DAYS = 10 
     
@@ -375,7 +374,6 @@ def fetch_all_data(stock_dict, progress_bar, status_text):
     if not stock_dict: return pd.DataFrame()
     
     all_tickers = list(stock_dict.keys())
-    # 重要修正：降低 Batch Size 以避免 401 和 Timeout
     BATCH_SIZE = 20 
     total_batches = (len(all_tickers) // BATCH_SIZE) + 1
     raw_data_list = []
@@ -383,7 +381,7 @@ def fetch_all_data(stock_dict, progress_bar, status_text):
     for i, batch_idx in enumerate(range(0, len(all_tickers), BATCH_SIZE)):
         batch = all_tickers[batch_idx : batch_idx + BATCH_SIZE]
         try:
-            # 重要修正：threads=False (單線程) 穩定性較高
+            # threads=False (單線程) 穩定性較高
             data = yf.download(batch, period="9mo", interval="1d", progress=False, auto_adjust=False, threads=False)
             if not data.empty:
                 try:
@@ -710,10 +708,9 @@ with st.sidebar:
         st.write(f"**🕒 系統最後重啟時間:** {get_taiwan_time_str()}")
         st.markdown("---")
         st.markdown("""
-        ### Ver 4.5 (Anti-Block & Fixes)
-        * **Fix**: **招呼語回歸** - 修復系統初始狀態下，歡迎畫面被隱藏的問題。
-        * **Fix**: **台灣時間校正** - 將系統所有時間顯示校正為 UTC+8。
-        * **Core**: **防擋機制 (Anti-Blocking)** - 降低下載速度 (Batch=20)，強制單線程 (Single-Thread)，並增加休息時間，大幅降低 401 錯誤與連線超時的機率。
+        ### Ver 4.6 (Final Polish)
+        * **UI**: 整合了自定義的「暖心招呼語」與歡迎畫面。
+        * **Milestone**: 程式碼邏輯趨於完整，感謝您的支持！🎉
         """)
     
     st.divider()
@@ -922,16 +919,20 @@ elif st.session_state['master_df'] is not None:
                 c2.metric("成交量", f"{selected_row['成交量(張)']} 張")
                 c3.metric("KD", selected_row['KD值'])
 
-# --- 4. 預設歡迎畫面 (當以上條件皆不符合時顯示) ---
+# --- 4. 預設歡迎畫面與招呼語 ---
 else:
     st.warning("👈 請先點擊左側 sidebar 的 **「🔄 下載最新股價」** 按鈕開始挖寶！")
     
     col1, col2, col3 = st.columns([1, 2, 1])
     with col2:
         if os.path.exists("welcome.jpg"):
-            st.markdown("""<div style="text-align: center; font-size: 1.1em; margin-bottom: 20px;">
-                這是數年來的經驗收納<br>此工具僅供參考，不代表投資建議<br>預祝心想事成，從從容容，紫氣東來! 🟣✨</div>""", unsafe_allow_html=True)
-            sub_c1, sub_c2, sub_c3 = st.columns([1, 1, 1])
-            with sub_c2: st.image("welcome.jpg", width=180)
-        else:
-            st.info("💡 尚未偵測到 welcome.jpg，但不影響功能。")
+            st.image("welcome.jpg", width=180)
+        
+        # 整合您的暖心招呼語
+        st.markdown("""
+        <div style="text-align: center; font-size: 1.2em; line-height: 2.0; color: #555; margin-top: 15px;">
+            這是數年來的經驗收納<br>
+            此工具僅供參考，不代表投資建議<br>
+            <span style="font-size: 1.3em; color: #6a0dad; font-weight: bold;">預祝心想事成，從從容容，紫氣東來! 🟣✨</span>
+        </div>
+        """, unsafe_allow_html=True)
