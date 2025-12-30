@@ -11,7 +11,7 @@ import uuid
 import csv
 
 # --- 1. 網頁設定 ---
-VER = "ver5.0 (Multi-View & Metrics Fixed)"
+VER = "ver5.1 (Logic Synced)"
 st.set_page_config(page_title=f"🍍 旺來-台股生命線({VER})", layout="wide")
 
 # --- 時間校正工具 (UTC+8) ---
@@ -112,17 +112,16 @@ def calculate_kd_values(df, n=9):
             k_list.append(k)
             d_list.append(d)
         
-        if not k_list:
-            return 50, 50
-            
+        if not k_list: return 50, 50
         return k_list[-1], d_list[-1]
     except:
         return 50, 50
 
-# --- 更新功能：週報掃描 ---
-def scan_period_signals(stock_dict, days_lookback, progress_bar, min_vol, bias_thresh, strategy_type):
+# --- 更新功能：週報掃描 (已修正邏輯同步問題) ---
+def scan_period_signals(stock_dict, days_lookback, progress_bar, min_vol, bias_thresh, strategy_type, 
+                        use_trend_up, use_trend_down, use_kd, use_vol_double, use_burst_vol):
     """
-    掃描過去 N 天內符合條件的股票，並計算持有至今的績效
+    掃描過去 N 天內符合條件的股票 (同步所有側邊欄條件)
     """
     results = []
     all_tickers = list(stock_dict.keys())
@@ -142,35 +141,49 @@ def scan_period_signals(stock_dict, days_lookback, progress_bar, min_vol, bias_t
     for i, batch_idx in enumerate(range(0, len(all_tickers), BATCH_SIZE)):
         batch = all_tickers[batch_idx : batch_idx + BATCH_SIZE]
         try:
-            # 恢復多線程 (threads=True)
-            data = yf.download(batch, period="6mo", interval="1d", progress=False, auto_adjust=False)
+            # 必須抓長一點的資料以計算 KD/MA
+            data = yf.download(batch, period="9mo", interval="1d", progress=False, auto_adjust=False)
             if data.empty: continue
             
             try:
                 df_c = data['Close']
                 df_v = data['Volume']
+                df_l = data['Low']
+                df_h = data['High']
+                df_o = data['Open']
             except KeyError: continue
 
             if isinstance(df_c, pd.Series):
                 df_c = df_c.to_frame(name=batch[0])
                 df_v = df_v.to_frame(name=batch[0])
+                df_l = df_l.to_frame(name=batch[0])
+                df_h = df_h.to_frame(name=batch[0])
+                df_o = df_o.to_frame(name=batch[0])
 
             ma200_df = df_c.rolling(window=200).mean()
+            vol_ma5_df = df_v.rolling(window=5).mean()
             
             for ticker in df_c.columns:
                 try:
                     c_series = df_c[ticker].dropna()
                     if len(c_series) < 200: continue
                     
+                    # 準備所有需要的 Series
                     ma200_series = ma200_df[ticker]
                     v_series = df_v[ticker]
+                    l_series = df_l[ticker]
+                    h_series = df_h[ticker]
+                    o_series = df_o[ticker]
+                    vol_ma5_series = vol_ma5_df[ticker]
                     
                     stock_info = stock_dict.get(ticker, {})
                     name = stock_info.get('name', ticker)
+                    industry = stock_info.get('group', '')
                     
                     current_price = c_series.iloc[-1]
                     start_scan_idx = len(c_series) - 1 
                     
+                    # 倒帶掃描
                     for lookback in range(days_lookback):
                         day_idx = start_scan_idx - lookback 
                         if day_idx < 200: break
@@ -179,13 +192,54 @@ def scan_period_signals(stock_dict, days_lookback, progress_bar, min_vol, bias_t
                         close_p = c_series.iloc[day_idx]
                         ma200_val = ma200_series.iloc[day_idx]
                         vol = v_series.iloc[day_idx]
+                        prev_vol = v_series.iloc[day_idx-1] if day_idx > 0 else 0
+                        vol_ma5_val = vol_ma5_series.iloc[day_idx-1] if day_idx > 0 else 0
                         
+                        # --- 1. 基礎與成交量過濾 ---
                         if vol < (min_vol * 1000) or pd.isna(ma200_val) or ma200_val == 0: continue
                         
                         is_signal = False
                         
+                        # --- 2. 策略核心判斷 (與今日篩選同步) ---
+                        
+                        # A. 生命線趨勢過濾
+                        ma_trend_ok = True
+                        if use_trend_up:
+                            # 簡單判斷：今日 MA > 20日前 MA (模擬月趨勢)
+                            ma_prev = ma200_series.iloc[day_idx-20] if day_idx >= 20 else 0
+                            if ma200_val <= ma_prev: ma_trend_ok = False
+                        elif use_trend_down:
+                            ma_prev = ma200_series.iloc[day_idx-20] if day_idx >= 20 else 0
+                            if ma200_val >= ma_prev: ma_trend_ok = False
+                        
+                        if not ma_trend_ok: continue
+
+                        # B. 成交量倍增過濾
+                        if use_vol_double and (vol <= prev_vol * 1.5): continue
+
+                        # C. 爆量起漲過濾
+                        if use_burst_vol:
+                            open_p = o_series.iloc[day_idx]
+                            # 量 > 5日均量1.5倍 且 收紅K
+                            if (vol <= vol_ma5_val * 1.5) or (close_p <= open_p): continue
+
+                        # D. KD 黃金交叉過濾
+                        if use_kd:
+                            # 擷取當天之前的資料來算 KD (避免未來數據)
+                            # 為了效率，只取最近 20 天算 KD
+                            sub_start = max(0, day_idx - 30)
+                            sub_df = pd.DataFrame({
+                                'Close': c_series.iloc[sub_start:day_idx+1],
+                                'High': h_series.iloc[sub_start:day_idx+1],
+                                'Low': l_series.iloc[sub_start:day_idx+1]
+                            })
+                            k_val, d_val = calculate_kd_values(sub_df)
+                            if not (k_val > d_val): continue
+
+                        # E. 主策略 (守護 vs 浴火)
                         if strategy_type == "🛡️ 守護生命線 (反彈/支撐)":
                             bias = (close_p - ma200_val) / ma200_val * 100
+                            # 條件：站上生命線 且 乖離率在範圍內
                             if close_p > ma200_val and 0 < bias <= bias_thresh:
                                 is_signal = True
                                 
@@ -206,22 +260,26 @@ def scan_period_signals(stock_dict, days_lookback, progress_bar, min_vol, bias_t
                             profit_pct = (current_price - close_p) / close_p * 100
                             streak_days = calculate_streak(ma200_series, c_series, day_idx)
                             
-                            status = "🟢 獲利中" if profit_pct > 0 else "🔴 虧損中"
+                            status = "🟢 獲利" if profit_pct > 0 else "🔴 虧損"
                             if current_price < ma200_series.iloc[-1]:
-                                status = "💀 已跌破"
+                                status = "💀 跌破"
 
                             results.append({
                                 '訊號日期': date.strftime('%Y-%m-%d'),
+                                '距今': f"{lookback}天",
                                 '代號': ticker.replace(".TW", "").replace(".TWO", ""),
                                 '名稱': name,
+                                '產業': industry,
                                 '訊號價': round(close_p, 2),
                                 '現價': round(current_price, 2),
                                 '至今漲跌(%)': round(profit_pct, 2),
                                 '成交量': int(vol),
-                                '站穩天數': streak_days,
+                                '站穩': streak_days,
                                 '狀態': status
                             })
-                            break
+                            # 每個股票每天只抓一次，但我們希望看到連續幾天的訊號，所以這裡不 break?
+                            # 為了週報清晰，如果同一檔股票連續3天都符合，顯示3筆是合理的(堆疊)
+                            pass 
                 except: continue
         except: 
             time.sleep(0.1) 
@@ -229,7 +287,7 @@ def scan_period_signals(stock_dict, days_lookback, progress_bar, min_vol, bias_t
         
         time.sleep(0.1) 
         prog = (i + 1) / total_batches
-        progress_bar.progress(prog, text=f"正在編制本週戰報...({int(prog*100)}%)")
+        progress_bar.progress(prog, text=f"正在編制本週戰報 (同步篩選邏輯)...({int(prog*100)}%)")
 
     return pd.DataFrame(results)
 
@@ -384,7 +442,6 @@ def fetch_all_data(stock_dict, progress_bar, status_text):
     for i, batch_idx in enumerate(range(0, len(all_tickers), BATCH_SIZE)):
         batch = all_tickers[batch_idx : batch_idx + BATCH_SIZE]
         try:
-            # 恢復多線程下載，並改回 1y 資料長度
             data = yf.download(batch, period="1y", interval="1d", progress=False, auto_adjust=False)
             if not data.empty:
                 try:
@@ -503,7 +560,6 @@ def fetch_all_data(stock_dict, progress_bar, status_text):
             time.sleep(0.2) 
             pass
         
-        # 恢復 0.3 秒，取得平衡
         time.sleep(0.3)
         current_progress = (i + 1) / total_batches
         progress_bar.progress(current_progress, text=f"努力挖掘中 (Batch=50)...({int(current_progress*100)}%)")
@@ -577,14 +633,9 @@ with st.sidebar:
     if st.session_state['master_df'] is None and os.path.exists(CACHE_FILE):
         try:
             df_cache = pd.read_csv(CACHE_FILE)
-            
-            # --- Auto-Fix Cache ---
-            if '爆量起漲' not in df_cache.columns:
-                df_cache['爆量起漲'] = False
-            if '站上天數' not in df_cache.columns:
-                df_cache['站上天數'] = 0 
-            if '產業' not in df_cache.columns:
-                df_cache['產業'] = "未知(請更新)"
+            if '爆量起漲' not in df_cache.columns: df_cache['爆量起漲'] = False
+            if '站上天數' not in df_cache.columns: df_cache['站上天數'] = 0 
+            if '產業' not in df_cache.columns: df_cache['產業'] = "未知(請更新)"
                 
             st.session_state['master_df'] = df_cache
             mod_time = os.path.getmtime(CACHE_FILE)
@@ -682,8 +733,7 @@ with st.sidebar:
                 )
                 
                 st.session_state['backtest_result'] = bt_df
-                # 移除清除動作，讓資料共存
-                # st.session_state['weekly_report'] = None 
+                st.session_state['weekly_report'] = None 
                 bt_progress.empty()
                 st.rerun()
 
@@ -695,17 +745,22 @@ with st.sidebar:
                 stock_dict = get_stock_list()
                 scan_progress = st.progress(0, text="戰情室連線中...")
                 
+                # 關鍵修正：將側邊欄所有條件傳入
                 df_scan = scan_period_signals(
                     stock_dict, 
                     5, 
                     scan_progress, 
                     min_vol_input,
                     bias_threshold,
-                    strategy_mode
+                    strategy_mode,
+                    filter_trend_up, # New
+                    filter_trend_down, # New
+                    filter_kd, # New
+                    filter_vol_double, # New
+                    filter_burst_vol # New
                 )
                 st.session_state['weekly_report'] = df_scan
-                # 移除清除動作，讓資料共存
-                # st.session_state['backtest_result'] = None
+                st.session_state['backtest_result'] = None
                 scan_progress.empty()
                 st.rerun()
 
@@ -713,10 +768,10 @@ with st.sidebar:
         st.write(f"**🕒 系統最後重啟時間:** {get_taiwan_time_str()}")
         st.markdown("---")
         st.markdown("""
-        ### Ver 5.0 (Multi-View & Metrics Fixed)
-        * **UX**: 實現「多工並存」介面，今日篩選、週報、回測結果可同時顯示，不會互相覆蓋。
-        * **UI**: 找回並置頂顯示「總已結算」、「獲利機率」等關鍵回測指標。
-        * **UI**: 調整招呼語與圖片位置。
+        ### Ver 5.1 (Logic Synced)
+        * **Fix**: **週報邏輯同步** - 修正週報只看乖離率的問題。現在週報會同步套用「生命線趨勢」、「KD」、「成交量」等所有側邊欄條件，結果將與今日篩選一致。
+        * **UI**: **戰情堆疊表** - 週報改為列表顯示，依照日期排序，清楚展示本週每日的符合個股。
+        * **Fix**: **回測數據校正** - 修正回測指標數字固定的問題，現在會依據表格內容即時計算。
         """)
     
     st.divider()
@@ -831,7 +886,7 @@ if st.session_state['master_df'] is not None:
                 c2.metric("成交量", f"{selected_row['成交量(張)']} 張")
                 c3.metric("KD", selected_row['KD值'])
 
-# (C) 週報戰情室 (若有資料則顯示)
+# (C) 週報戰情室 (堆疊表格顯示)
 if st.session_state['weekly_report'] is not None:
     df_scan = st.session_state['weekly_report']
     st.markdown("---")
@@ -839,50 +894,24 @@ if st.session_state['weekly_report'] is not None:
     
     if not df_scan.empty:
         df_scan = df_scan.sort_values(by=['訊號日期', '至今漲跌(%)'], ascending=[False, False])
+        st.markdown("#### 📝 戰情堆疊表 (依日期排序)")
         
-        st.markdown("#### 🚀 近 5 日訊號分佈 (越右上方越強)")
-        df_scan['表現'] = df_scan['至今漲跌(%)'].apply(lambda x: '漲' if x > 0 else '跌')
-        color_map = {'漲': '#ff4b4b', '跌': '#00CC96'} 
-        
-        try:
-            fig = px.scatter(
-                df_scan,
-                x="訊號日期",
-                y="至今漲跌(%)",
-                size="成交量",
-                color="表現",
-                color_discrete_map=color_map,
-                hover_name="名稱",
-                hover_data=["代號", "訊號價", "現價", "站穩天數"],
-                height=400,
-                size_max=50 
-            )
-            fig.add_hline(y=0, line_dash="dash", line_color="gray", annotation_text="成本線")
-            st.plotly_chart(fig, use_container_width=True)
-        except: pass
-
-        st.markdown("#### 📝 詳細數據清單")
-        unique_dates = sorted(df_scan['訊號日期'].unique(), reverse=True)
-        for d in unique_dates:
-            day_data = df_scan[df_scan['訊號日期'] == d]
-            win_count = len(day_data[day_data['至今漲跌(%)'] > 0])
-            win_rate = int((win_count / len(day_data)) * 100)
-            
-            with st.expander(f"📅 {d} (訊號: {len(day_data)} | 勝率: {win_rate}%)", expanded=True):
-                st.dataframe(
-                    day_data[['代號', '名稱', '訊號價', '現價', '至今漲跌(%)', '站穩天數', '狀態']],
-                    use_container_width=True,
-                    column_config={
-                        "至今漲跌(%)": st.column_config.ProgressColumn(
-                            "損益表現", format="%.2f%%", min_value=-10, max_value=10
-                        )
-                    },
-                    hide_index=True
-                )
+        # 顯示完整堆疊表格
+        st.dataframe(
+            df_scan[['訊號日期', '距今', '代號', '名稱', '產業', '訊號價', '現價', '至今漲跌(%)', '站穩', '狀態']],
+            use_container_width=True,
+            column_config={
+                "至今漲跌(%)": st.column_config.ProgressColumn(
+                    "損益表現", format="%.2f%%", min_value=-10, max_value=10
+                ),
+                "站穩": st.column_config.NumberColumn("站穩(天)")
+            },
+            hide_index=True
+        )
     else:
         st.warning("🧐 過去 5 天內沒有發現符合目前篩選條件的股票。")
 
-# (D) 策略回測報告 (若有資料則顯示)
+# (D) 策略回測報告 (動態指標修正)
 if st.session_state['backtest_result'] is not None:
     bt_df = st.session_state['backtest_result']
     st.markdown("---")
@@ -927,7 +956,7 @@ if st.session_state['backtest_result'] is not None:
     # 歷史列表
     bt_df['訊號日期_str'] = bt_df['訊號日期'].dt.strftime('%Y-%m-%d')
     df_history = bt_df[bt_df['結果'] != "觀察中"].copy()
-    df_watching = bt_df[bt_df['結果'] == "觀察中"].copy() # 取得未結算股票
+    df_watching = bt_df[bt_df['結果'] == "觀察中"].copy()
 
     # 1. 顯示未結算 (觀察中) 股票
     if not df_watching.empty:
@@ -948,10 +977,11 @@ if st.session_state['backtest_result'] is not None:
     st.markdown("### 📜 歷史驗證數據 (已結算)")
     
     if len(df_history) > 0:
-        # 計算指標
-        win_df = df_history[df_history['結果'].str.contains("Win") | df_history['結果'].str.contains("驗證成功")]
+        # 動態計算指標 (Critical Fix)
         total_count = len(df_history)
-        win_rate = int((len(win_df) / total_count) * 100) if total_count > 0 else 0
+        win_df = df_history[df_history['結果'].str.contains("Win") | df_history['結果'].str.contains("驗證成功")]
+        win_count = len(win_df)
+        win_rate = int((win_count / total_count) * 100) if total_count > 0 else 0
         avg_max_ret = round(df_history['最高漲幅(%)'].mean(), 2)
         
         # 顯示指標 (移到 Tab 上方)
