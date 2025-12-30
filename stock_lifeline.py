@@ -11,7 +11,7 @@ import uuid
 import csv
 
 # --- 1. 網頁設定 ---
-VER = "ver4.1 (Weekly Visual)"
+VER = "ver4.2 (Stable/Weekly)"
 st.set_page_config(page_title=f"🍍 旺來-台股生命線({VER})", layout="wide")
 
 # --- 流量紀錄與後台功能 ---
@@ -625,35 +625,40 @@ with st.sidebar:
     
     st.caption("⚠️ 回測將使用上方設定的「最低成交量」進行過濾。")
     if st.button("🧪 策略回測"):
-        st.info("阿吉正在調閱過去半年的歷史檔案，進行深度驗證... (請稍候) ⏳")
-        stock_dict = get_stock_list()
-        bt_progress = st.progress(0, text="初始化回測...")
-        
-        use_treasure_param = True if strategy_mode == "🔥 浴火重生 (假跌破)" else False
-        
-        bt_df = run_strategy_backtest(
-            stock_dict, 
-            bt_progress, 
-            use_trend_up=filter_trend_up, 
-            use_treasure=use_treasure_param, 
-            use_vol=filter_vol_double,
-            min_vol_threshold=min_vol_input,
-            use_burst_vol=filter_burst_vol
-        )
-        
-        st.session_state['backtest_result'] = bt_df
-        bt_progress.empty()
-        st.success("回測完成！請查看下方結果。")
-        st.rerun()
+        # --- 1. 新增：強制檢查資料庫狀態 ---
+        if st.session_state['master_df'] is None:
+            st.error("⛔ 請先點擊上方「🔄 下載最新股價」按鈕，初始化系統資料庫後再執行回測！")
+        else:
+            st.info("阿吉正在調閱過去半年的歷史檔案，進行深度驗證... (請稍候) ⏳")
+            stock_dict = get_stock_list()
+            bt_progress = st.progress(0, text="初始化回測...")
+            
+            use_treasure_param = True if strategy_mode == "🔥 浴火重生 (假跌破)" else False
+            
+            bt_df = run_strategy_backtest(
+                stock_dict, 
+                bt_progress, 
+                use_trend_up=filter_trend_up, 
+                use_treasure=use_treasure_param, 
+                use_vol=filter_vol_double,
+                min_vol_threshold=min_vol_input,
+                use_burst_vol=filter_burst_vol
+            )
+            
+            st.session_state['backtest_result'] = bt_df
+            bt_progress.empty()
+            st.success("回測完成！請查看下方結果。")
+            st.rerun()
 
     with st.expander("📅 系統開發日誌"):
         st.write(f"**🕒 系統最後重啟時間:** {datetime.now().strftime('%Y-%m-%d %H:%M')}")
         st.markdown("---")
         st.markdown("""
-        ### Ver 4.1 (Weekly Visual)
+        ### Ver 4.2 (Stable/Weekly)
+        * **Fix**: 修復 Plotly 繪圖錯誤，強化相容性。
+        * **Flow**: 策略回測前強制檢查資料庫狀態，避免空值錯誤。
         * **Admin**: 將管理員介面移至底部，操作更直覺。
-        * **New**: **戰略週報圖表** - 在策略回測中新增「勝率趨勢圖」，直觀展示每週戰果。
-        * **Fix**: 優化回測掃描範圍與顯示邏輯。
+        * **New**: 策略回測報告新增「週報戰情圖」，直觀展示每週戰果。
         """)
     
     # --- 移動至最後的 Admin 區塊 ---
@@ -686,6 +691,9 @@ if st.session_state['backtest_result'] is not None:
     
     st.subheader(f"🧪 策略回測報告：{s_name}")
     
+    # 2. 新增備註說明，讓改版有感
+    st.caption("📝 (v4.2 新功能已整合：自動產出週報戰情圖，請見下方)")
+
     # 確保訊號日期是 datetime
     bt_df['訊號日期'] = pd.to_datetime(bt_df['訊號日期'])
     
@@ -708,49 +716,55 @@ if st.session_state['backtest_result'] is not None:
         st.markdown("#### 🏆 戰略週報：勝率趨勢圖 (新手必看)")
         st.info("此圖表展示本策略在每週的「訊號出現次數」與「最終勝率」，幫助您判斷行情熱度與策略穩定性。")
 
-        # 2. 繪製複合圖 (Bar + Line)
-        fig_week = go.Figure()
+        # 2. 繪製複合圖 (Bar + Line) - 加上 Try Except 防止崩潰
+        try:
+            fig_week = go.Figure()
+            
+            # Bar: 訊號數量
+            fig_week.add_trace(go.Bar(
+                x=weekly_stats['週次字串'],
+                y=weekly_stats['總訊號數'],
+                name='訊號數量',
+                marker_color='rgba(50, 171, 96, 0.6)',
+                yaxis='y2'
+            ))
+
+            # Line: 勝率
+            fig_week.add_trace(go.Scatter(
+                x=weekly_stats['週次字串'],
+                y=weekly_stats['勝率'],
+                name='勝率(%)',
+                mode='lines+markers',
+                line=dict(color='#FF5733', width=3),
+                marker=dict(size=8)
+            ))
+
+            # 使用更安全的字典寫法 (title_font 取代 titlefont)
+            fig_week.update_layout(
+                title='每週 訊號數量 vs 勝率 趨勢',
+                template='plotly_white', # 讓圖表更乾淨豐富
+                xaxis=dict(title='週次 (該週起始日)'),
+                yaxis=dict(
+                    title='勝率 (%)',
+                    title_font=dict(color='#FF5733'),
+                    tickfont=dict(color='#FF5733'),
+                    range=[0, 105]
+                ),
+                yaxis2=dict(
+                    title='訊號數量 (檔)',
+                    title_font=dict(color='rgba(50, 171, 96, 0.6)'),
+                    tickfont=dict(color='rgba(50, 171, 96, 0.6)'),
+                    overlaying='y',
+                    side='right',
+                    showgrid=False
+                ),
+                hovermode="x unified",
+                legend=dict(orientation="h", y=1.1)
+            )
+            st.plotly_chart(fig_week, use_container_width=True)
+        except Exception as e:
+            st.warning(f"⚠️ 週報圖表繪製發生錯誤 (但不影響數據)，請聯繫管理員: {e}")
         
-        # Bar: 訊號數量
-        fig_week.add_trace(go.Bar(
-            x=weekly_stats['週次字串'],
-            y=weekly_stats['總訊號數'],
-            name='訊號數量',
-            marker_color='rgba(50, 171, 96, 0.6)',
-            yaxis='y2'
-        ))
-
-        # Line: 勝率
-        fig_week.add_trace(go.Scatter(
-            x=weekly_stats['週次字串'],
-            y=weekly_stats['勝率'],
-            name='勝率(%)',
-            mode='lines+markers',
-            line=dict(color='#FF5733', width=3),
-            marker=dict(size=8)
-        ))
-
-        fig_week.update_layout(
-            title='每週 訊號數量 vs 勝率 趨勢',
-            xaxis=dict(title='週次 (起始日)'),
-            yaxis=dict(
-                title='勝率 (%)',
-                titlefont=dict(color='#FF5733'),
-                tickfont=dict(color='#FF5733'),
-                range=[0, 105]
-            ),
-            yaxis2=dict(
-                title='訊號數量 (檔)',
-                titlefont=dict(color='rgba(50, 171, 96, 0.6)'),
-                tickfont=dict(color='rgba(50, 171, 96, 0.6)'),
-                overlaying='y',
-                side='right',
-                showgrid=False
-            ),
-            hovermode="x unified",
-            legend=dict(orientation="h", y=1.1)
-        )
-        st.plotly_chart(fig_week, use_container_width=True)
         st.markdown("---")
 
     # --- 原有的列表顯示 ---
