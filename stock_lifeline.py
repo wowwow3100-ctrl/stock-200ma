@@ -11,7 +11,7 @@ import uuid
 import csv
 
 # --- 1. 網頁設定 ---
-VER = "ver4.6 (Final Polish)"
+VER = "ver4.7 (Speed & 1k Milestone)"
 st.set_page_config(page_title=f"🍍 旺來-台股生命線({VER})", layout="wide")
 
 # --- 時間校正工具 (UTC+8) ---
@@ -123,7 +123,7 @@ def scan_period_signals(stock_dict, days_lookback, progress_bar, min_vol, bias_t
     """
     results = []
     all_tickers = list(stock_dict.keys())
-    BATCH_SIZE = 30 # 維持較低 Batch 防止阻擋
+    BATCH_SIZE = 50 # 加速回歸
     total_batches = (len(all_tickers) // BATCH_SIZE) + 1
     
     # 內部小工具：計算連續站穩天數
@@ -221,10 +221,9 @@ def scan_period_signals(stock_dict, days_lookback, progress_bar, min_vol, bias_t
                             break
                 except: continue
         except: 
-            time.sleep(1) 
+            time.sleep(0.5) 
             continue
         
-        time.sleep(1) 
         prog = (i + 1) / total_batches
         progress_bar.progress(prog, text=f"正在編制本週戰報...({int(prog*100)}%)")
 
@@ -234,7 +233,7 @@ def scan_period_signals(stock_dict, days_lookback, progress_bar, min_vol, bias_t
 def run_strategy_backtest(stock_dict, progress_bar, use_trend_up, use_treasure, use_vol, min_vol_threshold, use_burst_vol):
     results = []
     all_tickers = list(stock_dict.keys())
-    BATCH_SIZE = 30 
+    BATCH_SIZE = 50 # 加速回歸
     total_batches = (len(all_tickers) // BATCH_SIZE) + 1
     OBSERVE_DAYS = 10 
     
@@ -361,7 +360,7 @@ def run_strategy_backtest(stock_dict, progress_bar, use_trend_up, use_treasure, 
             time.sleep(1) 
             continue
         
-        time.sleep(1) # 強制休息
+        time.sleep(0.5) # 稍微縮短休息時間
         progress = (i + 1) / total_batches
         progress_bar.progress(progress, text=f"深度回測中 (計算分月數據)...({int(progress*100)}%)")
         
@@ -374,7 +373,7 @@ def fetch_all_data(stock_dict, progress_bar, status_text):
     if not stock_dict: return pd.DataFrame()
     
     all_tickers = list(stock_dict.keys())
-    BATCH_SIZE = 20 
+    BATCH_SIZE = 50 # 依需求改回 50
     total_batches = (len(all_tickers) // BATCH_SIZE) + 1
     raw_data_list = []
 
@@ -497,13 +496,13 @@ def fetch_all_data(stock_dict, progress_bar, status_text):
                         })
                     except: continue
         except Exception: 
-            time.sleep(1) # 遇到錯誤稍作休息
+            time.sleep(0.5) 
             pass
         
-        # 強制休息 1.5 秒以避開 401 錯誤
-        time.sleep(1.5)
+        # 縮短休息時間以提升速度
+        time.sleep(0.5)
         current_progress = (i + 1) / total_batches
-        progress_bar.progress(current_progress, text=f"努力挖掘中 (防擋機制啟動)...({int(current_progress*100)}%)")
+        progress_bar.progress(current_progress, text=f"努力挖掘中 (加速版)...({int(current_progress*100)}%)")
     
     df_result = pd.DataFrame(raw_data_list)
     if not df_result.empty:
@@ -599,9 +598,9 @@ with st.sidebar:
             with placeholder_emoji:
                 st.markdown("""<div style="text-align: center; font-size: 40px; animation: blink 1s infinite;">🎁💰✨</div>
                     <style>@keyframes blink { 0% { opacity: 1; } 50% { opacity: 0.5; } 100% { opacity: 1; } }</style>
-                    <div style="text-align: center;">連線下載中 (Batch=20)...</div>""", unsafe_allow_html=True)
+                    <div style="text-align: center;">連線下載中 (Batch=50)...</div>""", unsafe_allow_html=True)
             
-            st.caption("ℹ️ 已啟用防擋機制 (降速下載)，請耐心等候...")
+            st.caption("ℹ️ 已加速下載流程 (Batch=50)，請耐心等候...")
             status_text = st.empty()
             progress_bar = st.progress(0, text="準備下載...")
             df = fetch_all_data(stock_dict, progress_bar, status_text)
@@ -708,9 +707,9 @@ with st.sidebar:
         st.write(f"**🕒 系統最後重啟時間:** {get_taiwan_time_str()}")
         st.markdown("---")
         st.markdown("""
-        ### Ver 4.6 (Final Polish)
-        * **UI**: 整合了自定義的「暖心招呼語」與歡迎畫面。
-        * **Milestone**: 程式碼邏輯趨於完整，感謝您的支持！🎉
+        ### Ver 4.7 (Speed & 1k Milestone)
+        * **Speed**: 將下載批次量 (Batch) 調回 50，提升下載速度。
+        * **UI**: 調整招呼語位置至圖片上方，並加入千行里程碑賀詞。
         """)
     
     st.divider()
@@ -925,14 +924,15 @@ else:
     
     col1, col2, col3 = st.columns([1, 2, 1])
     with col2:
-        if os.path.exists("welcome.jpg"):
-            st.image("welcome.jpg", width=180)
-        
-        # 整合您的暖心招呼語
+        # 4.7 修正：將招呼語移至圖片上方
         st.markdown("""
-        <div style="text-align: center; font-size: 1.2em; line-height: 2.0; color: #555; margin-top: 15px;">
+        <div style="text-align: center; font-size: 1.2em; line-height: 2.0; color: #555; margin-bottom: 15px;">
             這是數年來的經驗收納<br>
             此工具僅供參考，不代表投資建議<br>
-            <span style="font-size: 1.3em; color: #6a0dad; font-weight: bold;">預祝心想事成，從從容容，紫氣東來! 🟣✨</span>
+            <span style="font-size: 1.3em; color: #6a0dad; font-weight: bold;">預祝心想事成，從從容容，紫氣東來! 🟣✨</span><br>
+            <span style="font-size: 0.9em; color: #888;">程式已達千行!越來越強大啦! 🚀</span>
         </div>
         """, unsafe_allow_html=True)
+
+        if os.path.exists("welcome.jpg"):
+            st.image("welcome.jpg", width=180)
