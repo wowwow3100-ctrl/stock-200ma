@@ -11,7 +11,7 @@ import uuid
 import csv
 
 # --- 1. 網頁設定 ---
-VER = "ver4.9 (Syntax Fix & Speed)"
+VER = "ver5.0 (Multi-View & Metrics Fixed)"
 st.set_page_config(page_title=f"🍍 旺來-台股生命線({VER})", layout="wide")
 
 # --- 時間校正工具 (UTC+8) ---
@@ -142,7 +142,7 @@ def scan_period_signals(stock_dict, days_lookback, progress_bar, min_vol, bias_t
     for i, batch_idx in enumerate(range(0, len(all_tickers), BATCH_SIZE)):
         batch = all_tickers[batch_idx : batch_idx + BATCH_SIZE]
         try:
-            # 恢復多線程 (threads=True, 預設值)
+            # 恢復多線程 (threads=True)
             data = yf.download(batch, period="6mo", interval="1d", progress=False, auto_adjust=False)
             if data.empty: continue
             
@@ -227,7 +227,6 @@ def scan_period_signals(stock_dict, days_lookback, progress_bar, min_vol, bias_t
             time.sleep(0.1) 
             continue
         
-        # 恢復原本的快速節奏
         time.sleep(0.1) 
         prog = (i + 1) / total_batches
         progress_bar.progress(prog, text=f"正在編制本週戰報...({int(prog*100)}%)")
@@ -245,7 +244,6 @@ def run_strategy_backtest(stock_dict, progress_bar, use_trend_up, use_treasure, 
     for i, batch_idx in enumerate(range(0, len(all_tickers), BATCH_SIZE)):
         batch = all_tickers[batch_idx : batch_idx + BATCH_SIZE]
         try:
-            # 恢復多線程
             data = yf.download(batch, period="2y", interval="1d", progress=False, auto_adjust=False)
             if data is None or data.empty: continue
 
@@ -366,7 +364,7 @@ def run_strategy_backtest(stock_dict, progress_bar, use_trend_up, use_treasure, 
             time.sleep(1) 
             continue
         
-        time.sleep(0.1) # 快速模式
+        time.sleep(0.1) 
         progress = (i + 1) / total_batches
         progress_bar.progress(progress, text=f"深度回測中 (計算分月數據)...({int(progress*100)}%)")
         
@@ -379,7 +377,7 @@ def fetch_all_data(stock_dict, progress_bar, status_text):
     if not stock_dict: return pd.DataFrame()
     
     all_tickers = list(stock_dict.keys())
-    BATCH_SIZE = 50 # 恢復 50
+    BATCH_SIZE = 50 
     total_batches = (len(all_tickers) // BATCH_SIZE) + 1
     raw_data_list = []
 
@@ -503,7 +501,7 @@ def fetch_all_data(stock_dict, progress_bar, status_text):
                     except: continue
         except Exception: 
             time.sleep(0.2) 
-            continue
+            pass
         
         # 恢復 0.3 秒，取得平衡
         time.sleep(0.3)
@@ -684,7 +682,8 @@ with st.sidebar:
                 )
                 
                 st.session_state['backtest_result'] = bt_df
-                st.session_state['weekly_report'] = None 
+                # 移除清除動作，讓資料共存
+                # st.session_state['weekly_report'] = None 
                 bt_progress.empty()
                 st.rerun()
 
@@ -705,7 +704,8 @@ with st.sidebar:
                     strategy_mode
                 )
                 st.session_state['weekly_report'] = df_scan
-                st.session_state['backtest_result'] = None
+                # 移除清除動作，讓資料共存
+                # st.session_state['backtest_result'] = None
                 scan_progress.empty()
                 st.rerun()
 
@@ -713,10 +713,10 @@ with st.sidebar:
         st.write(f"**🕒 系統最後重啟時間:** {get_taiwan_time_str()}")
         st.markdown("---")
         st.markdown("""
-        ### Ver 4.9 (Syntax Fix & Speed)
-        * **Fix**: 修復程式碼結構錯誤 (SyntaxError: invalid syntax)。
-        * **Speed**: 恢復多線程下載，並將 Batch 改回 50，提升下載速度。
-        * **UI**: 調整招呼語位置。
+        ### Ver 5.0 (Multi-View & Metrics Fixed)
+        * **UX**: 實現「多工並存」介面，今日篩選、週報、回測結果可同時顯示，不會互相覆蓋。
+        * **UI**: 找回並置頂顯示「總已結算」、「獲利機率」等關鍵回測指標。
+        * **UI**: 調整招呼語與圖片位置。
         """)
     
     st.divider()
@@ -738,127 +738,33 @@ with st.sidebar:
         elif admin_pwd:
             st.error("密碼錯誤")
 
-# --- 4. 顯示主畫面邏輯 ---
-# 確保縮排結構正確，避免 SyntaxError
+# ==========================================
+# 4. 顯示邏輯：區塊堆疊 (不再互斥)
+# ==========================================
 
-if st.session_state['weekly_report'] is not None:
-    df_scan = st.session_state['weekly_report']
-    st.markdown("---")
-    st.subheader(f"📊 本週戰報：{strategy_mode}")
-    
-    if not df_scan.empty:
-        df_scan = df_scan.sort_values(by=['訊號日期', '至今漲跌(%)'], ascending=[False, False])
-        
-        st.markdown("#### 🚀 近 5 日訊號分佈 (越右上方越強)")
-        df_scan['表現'] = df_scan['至今漲跌(%)'].apply(lambda x: '漲' if x > 0 else '跌')
-        color_map = {'漲': '#ff4b4b', '跌': '#00CC96'} 
-        
-        try:
-            fig = px.scatter(
-                df_scan,
-                x="訊號日期",
-                y="至今漲跌(%)",
-                size="成交量",
-                color="表現",
-                color_discrete_map=color_map,
-                hover_name="名稱",
-                hover_data=["代號", "訊號價", "現價", "站穩天數"],
-                height=400,
-                size_max=50 
-            )
-            fig.add_hline(y=0, line_dash="dash", line_color="gray", annotation_text="成本線")
-            st.plotly_chart(fig, use_container_width=True)
-        except: pass
+# (A) 預設歡迎畫面 (若完全沒資料)
+if st.session_state['master_df'] is None:
+    col1, col2, col3 = st.columns([1, 2, 1])
+    with col2:
+        st.markdown("""
+        <div style="text-align: center; font-size: 1.2em; line-height: 2.0; color: #555; margin-bottom: 15px;">
+            這是數年來的經驗收納<br>
+            此工具僅供參考，不代表投資建議<br>
+            <span style="font-size: 1.3em; color: #6a0dad; font-weight: bold;">預祝心想事成，從從容容，紫氣東來! 🟣✨</span><br>
+            <span style="font-size: 0.9em; color: #888;">程式已達千行!越來越強大啦! 🚀</span>
+        </div>
+        """, unsafe_allow_html=True)
 
-        st.markdown("#### 📝 詳細數據清單")
-        unique_dates = sorted(df_scan['訊號日期'].unique(), reverse=True)
-        for d in unique_dates:
-            day_data = df_scan[df_scan['訊號日期'] == d]
-            win_count = len(day_data[day_data['至今漲跌(%)'] > 0])
-            win_rate = int((win_count / len(day_data)) * 100)
+        if os.path.exists("welcome.jpg"):
+            st.image("welcome.jpg", width=180)
             
-            with st.expander(f"📅 {d} (訊號: {len(day_data)} | 勝率: {win_rate}%)", expanded=True):
-                st.dataframe(
-                    day_data[['代號', '名稱', '訊號價', '現價', '至今漲跌(%)', '站穩天數', '狀態']],
-                    use_container_width=True,
-                    column_config={
-                        "至今漲跌(%)": st.column_config.ProgressColumn(
-                            "損益表現", format="%.2f%%", min_value=-10, max_value=10
-                        )
-                    },
-                    hide_index=True
-                )
-    else:
-        st.warning("🧐 過去 5 天內沒有發現符合目前篩選條件的股票。")
+    st.warning("👈 請先點擊左側 sidebar 的 **「🔄 下載最新股價」** 按鈕開始挖寶！")
 
-elif st.session_state['backtest_result'] is not None:
-    bt_df = st.session_state['backtest_result']
-    st.markdown("---")
-    
-    s_name = "🛡️ 守護生命線"
-    if strategy_mode == "🔥 浴火重生 (假跌破)": s_name = "🔥 浴火重生"
-    
-    st.subheader(f"🧪 策略回測報告：{s_name}")
-    bt_df['訊號日期'] = pd.to_datetime(bt_df['訊號日期'])
-    
-    if not bt_df.empty:
-        bt_df['週次'] = bt_df['訊號日期'] - pd.to_timedelta(bt_df['訊號日期'].dt.dayofweek, unit='d')
-        weekly_stats = bt_df.groupby('週次').agg(
-            總訊號數=('代號', 'count'),
-            勝場數=('is_win', 'sum')
-        ).reset_index()
-        weekly_stats['勝率'] = (weekly_stats['勝場數'] / weekly_stats['總訊號數'] * 100).round(1)
-        weekly_stats['週次字串'] = weekly_stats['週次'].dt.strftime('%m/%d')
-        weekly_stats = weekly_stats.sort_values('週次')
-
-        st.markdown("#### 🏆 戰略週報：勝率趨勢圖")
-        try:
-            fig_week = go.Figure()
-            fig_week.add_trace(go.Bar(
-                x=weekly_stats['週次字串'], y=weekly_stats['總訊號數'], name='訊號數量', marker_color='rgba(50, 171, 96, 0.6)', yaxis='y2'
-            ))
-            fig_week.add_trace(go.Scatter(
-                x=weekly_stats['週次字串'], y=weekly_stats['勝率'], name='勝率(%)', mode='lines+markers', line=dict(color='#FF5733', width=3)
-            ))
-            fig_week.update_layout(
-                title='每週 訊號數量 vs 勝率', template='plotly_white', xaxis=dict(title='週次'),
-                yaxis=dict(title='勝率 (%)', title_font=dict(color='#FF5733'), range=[0, 105]),
-                yaxis2=dict(title='訊號數量', title_font=dict(color='rgba(50, 171, 96, 0.6)'), overlaying='y', side='right', showgrid=False),
-                hovermode="x unified", legend=dict(orientation="h", y=1.1)
-            )
-            st.plotly_chart(fig_week, use_container_width=True)
-        except Exception: pass
-        st.markdown("---")
-
-    bt_df['訊號日期_str'] = bt_df['訊號日期'].dt.strftime('%Y-%m-%d')
-    df_history = bt_df[bt_df['結果'] != "觀察中"].copy()
-    
-    if len(df_history) > 0:
-        months = sorted(df_history['月份'].unique())
-        tabs = st.tabs(["📊 總覽"] + months)
-        with tabs[0]:
-            win_df = df_history[df_history['結果'].str.contains("Win") | df_history['結果'].str.contains("驗證成功")]
-            total_count = len(df_history)
-            win_rate = int((len(win_df) / total_count) * 100) if total_count > 0 else 0
-            avg_max_ret = round(df_history['最高漲幅(%)'].mean(), 2)
-            
-            c1, c2, c3 = st.columns(3)
-            c1.metric("總已結算", total_count)
-            c2.metric("獲利機率", f"{win_rate}%")
-            c3.metric("平均損益", f"{avg_max_ret}%")
-            st.dataframe(df_history[['月份', '代號', '名稱', '訊號日期_str', '訊號價', '最高漲幅(%)', '結果']], use_container_width=True)
-            
-        for i, m in enumerate(months):
-            with tabs[i+1]:
-                m_df = df_history[df_history['月份'] == m]
-                def color_ret(val): return f'color: {"red" if val > 0 else "green"}'
-                st.dataframe(m_df[['代號', '名稱', '訊號日期_str', '訊號價', '最高漲幅(%)', '結果']].style.map(color_ret, subset=['最高漲幅(%)']), use_container_width=True)
-    else:
-        st.warning("在此回測期間內，沒有歷史股票符合條件。")
-
-elif st.session_state['master_df'] is not None:
+# (B) 今日篩選結果 (永遠顯示在最上方)
+if st.session_state['master_df'] is not None:
     df = st.session_state['master_df'].copy()
     
+    # 篩選邏輯
     if '生命線' not in df.columns:
         st.error("⚠️ 資料結構已更新！請重置系統。")
         st.stop()
@@ -925,19 +831,145 @@ elif st.session_state['master_df'] is not None:
                 c2.metric("成交量", f"{selected_row['成交量(張)']} 張")
                 c3.metric("KD", selected_row['KD值'])
 
-else:
-    st.warning("👈 請先點擊左側 sidebar 的 **「🔄 下載最新股價」** 按鈕開始挖寶！")
+# (C) 週報戰情室 (若有資料則顯示)
+if st.session_state['weekly_report'] is not None:
+    df_scan = st.session_state['weekly_report']
+    st.markdown("---")
+    st.subheader(f"📊 本週戰報：{strategy_mode}")
     
-    col1, col2, col3 = st.columns([1, 2, 1])
-    with col2:
-        st.markdown("""
-        <div style="text-align: center; font-size: 1.2em; line-height: 2.0; color: #555; margin-bottom: 15px;">
-            這是數年來的經驗收納<br>
-            此工具僅供參考，不代表投資建議<br>
-            <span style="font-size: 1.3em; color: #6a0dad; font-weight: bold;">預祝心想事成，從從容容，紫氣東來! 🟣✨</span><br>
-            <span style="font-size: 0.9em; color: #888;">程式已達千行!越來越強大啦! 🚀</span>
+    if not df_scan.empty:
+        df_scan = df_scan.sort_values(by=['訊號日期', '至今漲跌(%)'], ascending=[False, False])
+        
+        st.markdown("#### 🚀 近 5 日訊號分佈 (越右上方越強)")
+        df_scan['表現'] = df_scan['至今漲跌(%)'].apply(lambda x: '漲' if x > 0 else '跌')
+        color_map = {'漲': '#ff4b4b', '跌': '#00CC96'} 
+        
+        try:
+            fig = px.scatter(
+                df_scan,
+                x="訊號日期",
+                y="至今漲跌(%)",
+                size="成交量",
+                color="表現",
+                color_discrete_map=color_map,
+                hover_name="名稱",
+                hover_data=["代號", "訊號價", "現價", "站穩天數"],
+                height=400,
+                size_max=50 
+            )
+            fig.add_hline(y=0, line_dash="dash", line_color="gray", annotation_text="成本線")
+            st.plotly_chart(fig, use_container_width=True)
+        except: pass
+
+        st.markdown("#### 📝 詳細數據清單")
+        unique_dates = sorted(df_scan['訊號日期'].unique(), reverse=True)
+        for d in unique_dates:
+            day_data = df_scan[df_scan['訊號日期'] == d]
+            win_count = len(day_data[day_data['至今漲跌(%)'] > 0])
+            win_rate = int((win_count / len(day_data)) * 100)
+            
+            with st.expander(f"📅 {d} (訊號: {len(day_data)} | 勝率: {win_rate}%)", expanded=True):
+                st.dataframe(
+                    day_data[['代號', '名稱', '訊號價', '現價', '至今漲跌(%)', '站穩天數', '狀態']],
+                    use_container_width=True,
+                    column_config={
+                        "至今漲跌(%)": st.column_config.ProgressColumn(
+                            "損益表現", format="%.2f%%", min_value=-10, max_value=10
+                        )
+                    },
+                    hide_index=True
+                )
+    else:
+        st.warning("🧐 過去 5 天內沒有發現符合目前篩選條件的股票。")
+
+# (D) 策略回測報告 (若有資料則顯示)
+if st.session_state['backtest_result'] is not None:
+    bt_df = st.session_state['backtest_result']
+    st.markdown("---")
+    
+    s_name = "🛡️ 守護生命線"
+    if strategy_mode == "🔥 浴火重生 (假跌破)": s_name = "🔥 浴火重生"
+    
+    st.subheader(f"🧪 策略回測報告：{s_name}")
+    bt_df['訊號日期'] = pd.to_datetime(bt_df['訊號日期'])
+    
+    # 戰略週報圖表
+    if not bt_df.empty:
+        bt_df['週次'] = bt_df['訊號日期'] - pd.to_timedelta(bt_df['訊號日期'].dt.dayofweek, unit='d')
+        weekly_stats = bt_df.groupby('週次').agg(
+            總訊號數=('代號', 'count'),
+            勝場數=('is_win', 'sum')
+        ).reset_index()
+        weekly_stats['勝率'] = (weekly_stats['勝場數'] / weekly_stats['總訊號數'] * 100).round(1)
+        weekly_stats['週次字串'] = weekly_stats['週次'].dt.strftime('%m/%d')
+        weekly_stats = weekly_stats.sort_values('週次')
+
+        st.markdown("#### 🏆 戰略週報：勝率趨勢圖")
+        try:
+            fig_week = go.Figure()
+            fig_week.add_trace(go.Bar(
+                x=weekly_stats['週次字串'], y=weekly_stats['總訊號數'], name='訊號數量', marker_color='rgba(50, 171, 96, 0.6)', yaxis='y2'
+            ))
+            fig_week.add_trace(go.Scatter(
+                x=weekly_stats['週次字串'], y=weekly_stats['勝率'], name='勝率(%)', mode='lines+markers', line=dict(color='#FF5733', width=3)
+            ))
+            fig_week.update_layout(
+                title='每週 訊號數量 vs 勝率', template='plotly_white', xaxis=dict(title='週次'),
+                yaxis=dict(title='勝率 (%)', title_font=dict(color='#FF5733'), range=[0, 105]),
+                yaxis2=dict(title='訊號數量', title_font=dict(color='rgba(50, 171, 96, 0.6)'), overlaying='y', side='right', showgrid=False),
+                hovermode="x unified", legend=dict(orientation="h", y=1.1)
+            )
+            st.plotly_chart(fig_week, use_container_width=True)
+        except Exception: pass
+        
+    st.markdown("---")
+
+    # 歷史列表
+    bt_df['訊號日期_str'] = bt_df['訊號日期'].dt.strftime('%Y-%m-%d')
+    df_history = bt_df[bt_df['結果'] != "觀察中"].copy()
+    df_watching = bt_df[bt_df['結果'] == "觀察中"].copy() # 取得未結算股票
+
+    # 1. 顯示未結算 (觀察中) 股票
+    if not df_watching.empty:
+        st.markdown(f"""
+        <div style="background-color: #fff8dc; padding: 15px; border-radius: 10px; border: 2px solid #ffa500; margin-bottom: 20px;">
+            <h3 style="color: #d2691e; margin:0;">👀 旺來關注中 (進行中訊號)</h3>
+            <p style="color: #666; margin:5px 0 0 0;">這些股票訊號發生未滿 10 天，尚未結算。</p>
         </div>
         """, unsafe_allow_html=True)
+        
+        df_watching = df_watching.sort_values(by='訊號日期', ascending=False)
+        st.dataframe(
+            df_watching[['代號', '名稱', '產業', '訊號日期_str', '訊號價', '最高漲幅(%)']].style.background_gradient(cmap='Reds', subset=['最高漲幅(%)']),
+            use_container_width=True, hide_index=True
+        )
 
-        if os.path.exists("welcome.jpg"):
-            st.image("welcome.jpg", width=180)
+    # 2. 顯示已結算歷史數據
+    st.markdown("### 📜 歷史驗證數據 (已結算)")
+    
+    if len(df_history) > 0:
+        # 計算指標
+        win_df = df_history[df_history['結果'].str.contains("Win") | df_history['結果'].str.contains("驗證成功")]
+        total_count = len(df_history)
+        win_rate = int((len(win_df) / total_count) * 100) if total_count > 0 else 0
+        avg_max_ret = round(df_history['最高漲幅(%)'].mean(), 2)
+        
+        # 顯示指標 (移到 Tab 上方)
+        c1, c2, c3 = st.columns(3)
+        c1.metric("總已結算", total_count)
+        c2.metric("獲利機率", f"{win_rate}%")
+        c3.metric("平均損益", f"{avg_max_ret}%")
+
+        months = sorted(df_history['月份'].unique())
+        tabs = st.tabs(["📊 總覽"] + months)
+        
+        with tabs[0]:
+            st.dataframe(df_history[['月份', '代號', '名稱', '訊號日期_str', '訊號價', '最高漲幅(%)', '結果']], use_container_width=True)
+            
+        for i, m in enumerate(months):
+            with tabs[i+1]:
+                m_df = df_history[df_history['月份'] == m]
+                def color_ret(val): return f'color: {"red" if val > 0 else "green"}'
+                st.dataframe(m_df[['代號', '名稱', '訊號日期_str', '訊號價', '最高漲幅(%)', '結果']].style.map(color_ret, subset=['最高漲幅(%)']), use_container_width=True)
+    else:
+        st.warning("在此回測期間內，沒有歷史股票符合條件。")
