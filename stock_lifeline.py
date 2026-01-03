@@ -57,7 +57,7 @@ if not st.session_state['auth_status']:
         st.caption("還沒有密碼？或是想了解更多投資觀點？")
         
         # *** 請修改下方的 URL 為您的 Threads 連結 ***
-        st.link_button("🚀 前往我的「脆 (Threads)」互動", "https://www.threads.net/", use_container_width=True)
+        st.link_button("🚀 前往我的「脆 (Threads)」互動", "https://www.threads.net/wowwow31001", use_container_width=True)
     
     # ⛔ 關鍵：在此停止執行後續所有程式碼，直到密碼正確
     st.stop()
@@ -833,3 +833,4 @@ if st.session_state['backtest_result'] is not None:
                 st.dataframe(m_df[['代號', '名稱', '訊號日期_str', '訊號價', '最高漲幅(%)', '結果']].style.map(color_ret, subset=['最高漲幅(%)']), use_container_width=True)
     else:
         st.warning("在此回測期間內，沒有歷史股票符合條件。")
+
