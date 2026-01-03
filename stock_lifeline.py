@@ -11,8 +11,60 @@ import uuid
 import csv
 
 # --- 1. 網頁設定 ---
-VER = "ver5.2 (Simplified)"
+VER = "ver5.3 (Secure & Threads)"
 st.set_page_config(page_title=f"🍍 旺來-台股生命線({VER})", layout="wide")
+
+# ==========================================
+# 🔒 安全鎖定與導流機制 (Security & Traffic)
+# ==========================================
+if 'auth_status' not in st.session_state:
+    st.session_state['auth_status'] = False
+
+if not st.session_state['auth_status']:
+    col1, col2, col3 = st.columns([1, 2, 1])
+    with col2:
+        # 1. 顯示歡迎圖片 (如果有)
+        if os.path.exists("welcome.jpg"):
+            st.image("welcome.jpg", width=200)
+            
+        # 2. 顯示目前的歡迎詞
+        st.markdown("""
+        <div style="text-align: center; font-size: 1.2em; line-height: 2.0; color: #555; margin: 15px 0;">
+            這是數年來的經驗收納<br>
+            此工具僅供參考，不代表投資建議<br>
+            <span style="font-size: 1.3em; color: #6a0dad; font-weight: bold;">預祝心想事成，從從容容，紫氣東來! 🟣✨</span>
+        </div>
+        """, unsafe_allow_html=True)
+
+        st.divider()
+
+        # 3. 密碼輸入區
+        st.markdown("### 🔐 請輸入通行密碼")
+        pwd_input = st.text_input("Password", type="password", label_visibility="collapsed", placeholder="請輸入密碼...")
+        
+        if pwd_input:
+            if pwd_input == "2026888":
+                st.session_state['auth_status'] = True
+                st.toast("✅ 驗證成功，歡迎回來！")
+                time.sleep(0.5)
+                st.rerun()
+            else:
+                st.error("❌ 密碼錯誤")
+
+        # 4. 導流到脆 (Threads)
+        st.markdown("<br>", unsafe_allow_html=True)
+        st.markdown("---")
+        st.caption("還沒有密碼？或是想了解更多投資觀點？")
+        
+        # *** 請修改下方的 URL 為您的 Threads 連結 ***
+        st.link_button("🚀 前往我的「脆 (Threads)」互動", "https://www.threads.net/", use_container_width=True)
+    
+    # ⛔ 關鍵：在此停止執行後續所有程式碼，直到密碼正確
+    st.stop()
+
+# ==========================================
+# (以下為通過驗證後的正常程式碼)
+# ==========================================
 
 # --- 時間校正工具 (UTC+8) ---
 def get_taiwan_time():
@@ -390,7 +442,6 @@ def fetch_all_data(stock_dict, progress_bar, status_text):
             time.sleep(0.2) 
             pass
         
-        # 恢復 0.3 秒，取得平衡
         time.sleep(0.3)
         current_progress = (i + 1) / total_batches
         progress_bar.progress(current_progress, text=f"努力挖掘中 (Batch=50)...({int(current_progress*100)}%)")
@@ -571,7 +622,8 @@ with st.sidebar:
         st.write(f"**🕒 系統最後重啟時間:** {get_taiwan_time_str()}")
         st.markdown("---")
         st.markdown("""
-        ### Ver 5.2 (Simplified)
+        ### Ver 5.3 (Secure & Threads)
+        * **Security**: 新增密碼鎖定機制 (2026888)，防止未授權訪問。
         * **UI**: 簡化按鈕設計，單一「策略回測」按鈕即可產出完整報告。
         * **Fix**: 移除冗餘的「本週戰報」按鈕，統一由回測結果中的「旺來關注中」呈現近期訊號。
         * **UX**: 戰情堆疊表 (週報) 概念整合至回測報告，避免介面混亂。
