@@ -12,7 +12,7 @@ import csv
 import gc
 
 # --- 1. 網頁設定 ---
-VER = "v6.2 Stability Fix"
+VER = "v6.3 (High Performance)"
 st.set_page_config(page_title=f"🍍 旺來-台股生命線({VER})", layout="wide")
 
 # ==========================================
@@ -152,7 +152,8 @@ def scan_period_signals(stock_dict, days_lookback, progress_bar, min_vol, bias_t
                         use_trend_up, use_trend_down, use_kd, use_vol_double, use_burst_vol):
     results = []
     all_tickers = list(stock_dict.keys())
-    BATCH_SIZE = 100 
+    # v6.3 調校：改回 50 並開啟多線程
+    BATCH_SIZE = 50 
     total_batches = (len(all_tickers) // BATCH_SIZE) + 1
     
     def calculate_streak(ma_series, close_series, start_idx):
@@ -165,7 +166,8 @@ def scan_period_signals(stock_dict, days_lookback, progress_bar, min_vol, bias_t
     for i, batch_idx in enumerate(range(0, len(all_tickers), BATCH_SIZE)):
         batch = all_tickers[batch_idx : batch_idx + BATCH_SIZE]
         try:
-            data = yf.download(batch, period="9mo", interval="1d", progress=False, auto_adjust=False, threads=False)
+            # v6.3: threads=True (預設) 回歸極速
+            data = yf.download(batch, period="9mo", interval="1d", progress=False, auto_adjust=False)
             if data.empty: continue
             try:
                 df_c = data['Close']; df_v = data['Volume']; df_l = data['Low']
@@ -265,14 +267,15 @@ def scan_period_signals(stock_dict, days_lookback, progress_bar, min_vol, bias_t
 def run_strategy_backtest(stock_dict, progress_bar, use_trend_up, use_treasure, use_vol, min_vol_threshold, use_burst_vol):
     results = []
     all_tickers = list(stock_dict.keys())
-    BATCH_SIZE = 100 
+    BATCH_SIZE = 50 
     total_batches = (len(all_tickers) // BATCH_SIZE) + 1
     OBSERVE_DAYS = 10 
     
     for i, batch_idx in enumerate(range(0, len(all_tickers), BATCH_SIZE)):
         batch = all_tickers[batch_idx : batch_idx + BATCH_SIZE]
         try:
-            data = yf.download(batch, period="2y", interval="1d", progress=False, auto_adjust=False, threads=False)
+            # v6.3: threads=True
+            data = yf.download(batch, period="2y", interval="1d", progress=False, auto_adjust=False)
             if data is None or data.empty: continue
             try:
                 df_c = data['Close']; df_v = data['Volume']; df_l = data['Low']
@@ -371,14 +374,16 @@ def run_strategy_backtest(stock_dict, progress_bar, use_trend_up, use_treasure, 
 def fetch_all_data(stock_dict, progress_bar, status_text):
     if not stock_dict: return pd.DataFrame()
     all_tickers = list(stock_dict.keys())
-    BATCH_SIZE = 100 
+    # v6.3 調校：改回 50 並開啟多線程
+    BATCH_SIZE = 50 
     total_batches = (len(all_tickers) // BATCH_SIZE) + 1
     raw_data_list = []
 
     for i, batch_idx in enumerate(range(0, len(all_tickers), BATCH_SIZE)):
         batch = all_tickers[batch_idx : batch_idx + BATCH_SIZE]
         try:
-            data = yf.download(batch, period="1y", interval="1d", progress=False, auto_adjust=False, threads=False)
+            # v6.3: threads=True (預設) 回歸極速
+            data = yf.download(batch, period="1y", interval="1d", progress=False, auto_adjust=False)
             if not data.empty:
                 try:
                     df_c = data['Close']; df_h = data['High']; df_l = data['Low']
@@ -458,7 +463,7 @@ def fetch_all_data(stock_dict, progress_bar, status_text):
         del data; gc.collect()
         time.sleep(0.3)
         current_progress = (i + 1) / total_batches
-        progress_bar.progress(current_progress, text=f"努力挖掘中 (Batch=100)...({int(current_progress*100)}%)")
+        progress_bar.progress(current_progress, text=f"努力挖掘中 (Batch=50)...({int(current_progress*100)}%)")
     
     df_result = pd.DataFrame(raw_data_list)
     if not df_result.empty: df_result = df_result.drop_duplicates(subset=['完整代號']) 
@@ -536,8 +541,8 @@ with st.sidebar:
             with placeholder_emoji:
                 st.markdown("""<div style="text-align: center; font-size: 40px; animation: blink 1s infinite;">🎁💰✨</div>
                     <style>@keyframes blink { 0% { opacity: 1; } 50% { opacity: 0.5; } 100% { opacity: 1; } }</style>
-                    <div style="text-align: center;">連線下載中 (Batch=100)...</div>""", unsafe_allow_html=True)
-            st.caption("ℹ️ 已啟用穩定下載模式 (單線程/Batch 100)，請耐心等候...")
+                    <div style="text-align: center;">連線下載中 (Batch=50)...</div>""", unsafe_allow_html=True)
+            st.caption("ℹ️ 已加速下載流程 (Batch=50)，請耐心等候...")
             status_text = st.empty()
             progress_bar = st.progress(0, text="準備下載...")
             df = fetch_all_data(stock_dict, progress_bar, status_text)
@@ -615,7 +620,12 @@ with st.sidebar:
     with st.expander("📅 系統開發日誌"):
         st.write(f"**🕒 系統最後重啟時間:** {get_taiwan_time_str()}")
         st.markdown("---")
-        st.markdown("### Ver 6.2 Stability Fix\n* **Fix**: 修復個股趨勢圖因代號格式問題導致的崩潰 (IndexError)。\n* **UI**: 調整贊助按鈕位置，確保其始終可見。")
+        st.markdown("""
+        ### Ver 6.3 (High Performance)
+        * **Speed**: 回歸多線程 (Multi-thread) 下載引擎，大幅縮短數據更新等待時間。
+        * **Opt**: 優化批次參數 (Batch=50) 與記憶體管理，在速度與穩定性間取得平衡。
+        * **Fix**: 修復個股趨勢圖因代號格式問題導致的錯誤。
+        """)
     
     st.divider()
     with st.expander("🔐 管理員後台"):
@@ -629,6 +639,10 @@ with st.sidebar:
                 st.dataframe(log_df.sort_values(by="時間", ascending=False), use_container_width=True)
                 with open(LOG_FILE, "rb") as f:
                     st.download_button("📥 下載 Log", f, file_name="traffic_log.csv", mime="text/csv")
+            else:
+                st.info("尚無流量紀錄。")
+        elif admin_pwd:
+            st.error("密碼錯誤")
 
 # ==========================================
 # 4. 顯示邏輯
@@ -675,20 +689,16 @@ if st.session_state['master_df'] is not None:
             st.markdown("### 🔍 個股趨勢圖")
             if len(df) > 0:
                 selected_stock_label = st.selectbox("請選擇一檔股票：", (df['代號'].astype(str) + " " + df['名稱']).tolist())
-                # 6.2 修正：更安全的字串切割與查詢
                 try:
                     selected_code = str(selected_stock_label).split(" ")[0]
-                    # 必須將代號欄位轉為字串才能正確比對
                     df['代號_str'] = df['代號'].astype(str)
                     full_code_series = df[df['代號_str'] == selected_code]['完整代號']
                     if not full_code_series.empty:
                         full_code = full_code_series.values[0]
                         stock_name = selected_stock_label.split(" ")[1] if len(selected_stock_label.split(" ")) > 1 else selected_code
                         plot_stock_chart(full_code, stock_name)
-                    else:
-                        st.error("找不到該股票代號，請重新整理。")
-                except Exception as e:
-                    st.error(f"發生錯誤：{e}")
+                    else: st.error("找不到該股票代號，請重新整理。")
+                except Exception as e: st.error(f"發生錯誤：{e}")
 
 if st.session_state['weekly_report'] is not None:
     df_scan = st.session_state['weekly_report']
@@ -732,10 +742,8 @@ if st.session_state['backtest_result'] is not None:
 
         months = sorted(df_history['月份'].unique())
         tabs = st.tabs(["📊 總覽"] + months)
-        
         with tabs[0]:
             st.dataframe(df_history[['月份', '代號', '名稱', '訊號日期_str', '訊號價', '最高漲幅(%)', '結果']], use_container_width=True)
-            
         for i, m in enumerate(months):
             with tabs[i+1]:
                 m_df = df_history[df_history['月份'] == m]
