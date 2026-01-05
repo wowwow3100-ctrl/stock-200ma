@@ -9,14 +9,14 @@ import plotly.express as px
 import os
 import uuid
 import csv
-import gc  # 新增：垃圾回收機制
+import gc
 
 # --- 1. 網頁設定 ---
-VER = "v6.1 Stability Patch"
+VER = "v6.2 Stability Fix"
 st.set_page_config(page_title=f"🍍 旺來-台股生命線({VER})", layout="wide")
 
 # ==========================================
-# 🔒 安全鎖定與導流機制 (Security Access Layer)
+# 🔒 安全鎖定與導流機制
 # ==========================================
 if 'auth_status' not in st.session_state:
     st.session_state['auth_status'] = False
@@ -47,7 +47,7 @@ if not st.session_state['auth_status']:
                 time.sleep(0.5)
                 st.rerun()
             else:
-                st.error("❌ 密碼錯誤，存取被拒絕。")
+                st.error("❌ 密碼錯誤")
 
         st.markdown("<br>", unsafe_allow_html=True)
         st.markdown("---")
@@ -57,12 +57,11 @@ if not st.session_state['auth_status']:
     st.stop()
 
 # ==========================================
-# (主程式核心邏輯開始)
+# (主程式開始)
 # ==========================================
 
 # --- 時間校正工具 (UTC+8) ---
 def get_taiwan_time():
-    """取得台灣時間 (UTC+8)"""
     utc_now = datetime.now(timezone.utc)
     tw_time = utc_now + timedelta(hours=8)
     return tw_time
@@ -70,7 +69,7 @@ def get_taiwan_time():
 def get_taiwan_time_str():
     return get_taiwan_time().strftime("%Y-%m-%d %H:%M:%S")
 
-# --- 流量紀錄與後台功能 ---
+# --- 流量紀錄 ---
 LOG_FILE = "traffic_log.csv"
 
 def get_remote_ip():
@@ -87,56 +86,52 @@ def get_remote_ip():
         pass
     return "Unknown/Local"
 
+def log_action(action_name):
+    current_time = get_taiwan_time_str()
+    user_ip = get_remote_ip()
+    if 'session_id' not in st.session_state:
+        st.session_state['session_id'] = str(uuid.uuid4())[:8]
+    session_id = st.session_state['session_id']
+    file_exists = os.path.exists(LOG_FILE)
+    try:
+        with open(LOG_FILE, mode='a', newline='', encoding='utf-8') as f:
+            writer = csv.writer(f)
+            if not file_exists:
+                writer.writerow(["時間", "IP位址", "Session_ID", "頁面動作"])
+            writer.writerow([current_time, user_ip, session_id, action_name])
+    except: pass
+
 def log_traffic():
-    """紀錄使用者訪問 (Session 級別去重)"""
     if 'session_id' not in st.session_state:
         st.session_state['session_id'] = str(uuid.uuid4())[:8] 
         st.session_state['has_logged'] = False
 
     if not st.session_state['has_logged']:
-        current_time = get_taiwan_time_str()
-        user_ip = get_remote_ip()
-        session_id = st.session_state['session_id']
-        
-        file_exists = os.path.exists(LOG_FILE)
-        try:
-            with open(LOG_FILE, mode='a', newline='', encoding='utf-8') as f:
-                writer = csv.writer(f)
-                if not file_exists:
-                    writer.writerow(["時間", "IP位址", "Session_ID", "頁面動作"])
-                writer.writerow([current_time, user_ip, session_id, "進入首頁"])
-        except:
-            pass 
+        log_action("進入首頁")
         st.session_state['has_logged'] = True
 
 log_traffic()
 
-# --- 2. 核心運算區 ---
-
+# --- 核心功能區 ---
 @st.cache_data(ttl=3600, show_spinner=False)
 def get_stock_list():
-    """取得台股清單 (排除金融/ETF)"""
     try:
         tse = twstock.twse
         otc = twstock.tpex
         stock_dict = {}
         exclude_industries = ['金融保險業', '存託憑證']
-        
         for code, info in tse.items():
             if info.type == '股票' and info.group not in exclude_industries:
                 stock_dict[f"{code}.TW"] = {'name': info.name, 'code': code, 'group': info.group}
-        
         for code, info in otc.items():
             if info.type == '股票' and info.group not in exclude_industries:
                 key = f"{code}.TWO"
                 if f"{code}.TW" not in stock_dict: 
                     stock_dict[key] = {'name': info.name, 'code': code, 'group': info.group}
         return stock_dict
-    except:
-        return {}
+    except: return {}
 
 def calculate_kd_values(df, n=9):
-    """計算 KD 指標"""
     try:
         low_min = df['Low'].rolling(window=n).min()
         high_max = df['High'].rolling(window=n).max()
@@ -144,23 +139,19 @@ def calculate_kd_values(df, n=9):
         rsv = rsv.fillna(50)
         k, d = 50, 50
         k_list, d_list = [], []
-        
         for r in rsv:
             k = (2/3) * k + (1/3) * r
             d = (2/3) * d + (1/3) * k
             k_list.append(k); d_list.append(d)
-        
         if not k_list: return 50, 50
         return k_list[-1], d_list[-1]
-    except:
-        return 50, 50
+    except: return 50, 50
 
-# --- 核心功能：週報掃描 ---
+# --- 週報掃描 ---
 def scan_period_signals(stock_dict, days_lookback, progress_bar, min_vol, bias_thresh, strategy_type, 
                         use_trend_up, use_trend_down, use_kd, use_vol_double, use_burst_vol):
     results = []
     all_tickers = list(stock_dict.keys())
-    # v6.1 優化：使用大批次 + 單線程，防止 OOM (Out of Memory)
     BATCH_SIZE = 100 
     total_batches = (len(all_tickers) // BATCH_SIZE) + 1
     
@@ -174,10 +165,8 @@ def scan_period_signals(stock_dict, days_lookback, progress_bar, min_vol, bias_t
     for i, batch_idx in enumerate(range(0, len(all_tickers), BATCH_SIZE)):
         batch = all_tickers[batch_idx : batch_idx + BATCH_SIZE]
         try:
-            # v6.1 關鍵修正：threads=False 防止白屏崩潰
             data = yf.download(batch, period="9mo", interval="1d", progress=False, auto_adjust=False, threads=False)
             if data.empty: continue
-            
             try:
                 df_c = data['Close']; df_v = data['Volume']; df_l = data['Low']
                 df_h = data['High']; df_o = data['Open']
@@ -195,26 +184,20 @@ def scan_period_signals(stock_dict, days_lookback, progress_bar, min_vol, bias_t
                 try:
                     c_series = df_c[ticker].dropna()
                     if len(c_series) < 200: continue
-                    
                     ma200_series = ma200_df[ticker]; v_series = df_v[ticker]
                     l_series = df_l[ticker]; h_series = df_h[ticker]
                     o_series = df_o[ticker]; vol_ma5_series = vol_ma5_df[ticker]
-                    
                     stock_info = stock_dict.get(ticker, {})
                     name = stock_info.get('name', ticker)
                     industry = stock_info.get('group', '')
-                    
                     current_price = c_series.iloc[-1]
                     start_scan_idx = len(c_series) - 1 
                     
                     for lookback in range(days_lookback):
                         day_idx = start_scan_idx - lookback 
                         if day_idx < 200: break
-                        
-                        date = c_series.index[day_idx]
-                        close_p = c_series.iloc[day_idx]
-                        ma200_val = ma200_series.iloc[day_idx]
-                        vol = v_series.iloc[day_idx]
+                        date = c_series.index[day_idx]; close_p = c_series.iloc[day_idx]
+                        ma200_val = ma200_series.iloc[day_idx]; vol = v_series.iloc[day_idx]
                         prev_vol = v_series.iloc[day_idx-1] if day_idx > 0 else 0
                         vol_ma5_val = vol_ma5_series.iloc[day_idx-1] if day_idx > 0 else 0
                         
@@ -269,24 +252,19 @@ def scan_period_signals(stock_dict, days_lookback, progress_bar, min_vol, bias_t
                             })
                             pass 
                 except: continue
-        except: 
-            time.sleep(0.1); continue
+        except: time.sleep(0.1); continue
         
-        # 記憶體優化：手動釋放資源
-        del data
-        gc.collect()
-        
+        del data; gc.collect()
         time.sleep(0.1) 
         prog = (i + 1) / total_batches
         progress_bar.progress(prog, text=f"正在編制戰情報告...({int(prog*100)}%)")
 
     return pd.DataFrame(results)
 
-# --- 核心功能：長期回測 ---
+# --- 長期回測 ---
 def run_strategy_backtest(stock_dict, progress_bar, use_trend_up, use_treasure, use_vol, min_vol_threshold, use_burst_vol):
     results = []
     all_tickers = list(stock_dict.keys())
-    # v6.1 優化：使用大批次 + 單線程
     BATCH_SIZE = 100 
     total_batches = (len(all_tickers) // BATCH_SIZE) + 1
     OBSERVE_DAYS = 10 
@@ -294,10 +272,8 @@ def run_strategy_backtest(stock_dict, progress_bar, use_trend_up, use_treasure, 
     for i, batch_idx in enumerate(range(0, len(all_tickers), BATCH_SIZE)):
         batch = all_tickers[batch_idx : batch_idx + BATCH_SIZE]
         try:
-            # threads=False
             data = yf.download(batch, period="2y", interval="1d", progress=False, auto_adjust=False, threads=False)
             if data is None or data.empty: continue
-
             try:
                 df_c = data['Close']; df_v = data['Volume']; df_l = data['Low']
                 df_h = data['High']; df_o = data['Open'] 
@@ -375,24 +351,16 @@ def run_strategy_backtest(stock_dict, progress_bar, use_trend_up, use_treasure, 
                                     else: result_status = "Loss 📉"
 
                             results.append({
-                                '訊號日期': date,
-                                '月份': '👀 關注中' if is_watching else month_str,
-                                '代號': ticker.replace(".TW", "").replace(".TWO", ""),
-                                '名稱': stock_name,
-                                '產業': stock_industry,
-                                '訊號價': round(close_p, 2),
-                                '最高漲幅(%)': round(final_profit_pct, 2),
-                                '結果': "觀察中" if is_watching else result_status,
-                                'is_win': 1 if final_profit_pct > 0 else 0
+                                '訊號日期': date, '月份': '👀 關注中' if is_watching else month_str,
+                                '代號': ticker.replace(".TW", "").replace(".TWO", ""), '名稱': stock_name, '產業': stock_industry,
+                                '訊號價': round(close_p, 2), '最高漲幅(%)': round(final_profit_pct, 2),
+                                '結果': "觀察中" if is_watching else result_status, 'is_win': 1 if final_profit_pct > 0 else 0
                             })
                             break 
                 except: continue
         except Exception: time.sleep(1); continue
         
-        # 記憶體優化
-        del data
-        gc.collect()
-        
+        del data; gc.collect()
         time.sleep(0.1) 
         progress = (i + 1) / total_batches
         progress_bar.progress(progress, text=f"深度回測中 (計算分月數據)...({int(progress*100)}%)")
@@ -403,7 +371,6 @@ def run_strategy_backtest(stock_dict, progress_bar, use_trend_up, use_treasure, 
 def fetch_all_data(stock_dict, progress_bar, status_text):
     if not stock_dict: return pd.DataFrame()
     all_tickers = list(stock_dict.keys())
-    # v6.1 優化：提升批次，關閉多線程
     BATCH_SIZE = 100 
     total_batches = (len(all_tickers) // BATCH_SIZE) + 1
     raw_data_list = []
@@ -488,10 +455,7 @@ def fetch_all_data(stock_dict, progress_bar, status_text):
                     except: continue
         except Exception: time.sleep(0.2); pass
         
-        # 記憶體優化
-        del data
-        gc.collect()
-        
+        del data; gc.collect()
         time.sleep(0.3)
         current_progress = (i + 1) / total_batches
         progress_bar.progress(current_progress, text=f"努力挖掘中 (Batch=100)...({int(current_progress*100)}%)")
@@ -638,27 +602,20 @@ with st.sidebar:
                 scan_progress.empty(); bt_progress.empty()
                 st.rerun()
 
-    # --- 專業版開發日誌 (Expander) ---
-    with st.expander("📅 系統開發日誌 (Release Notes)"):
+    # --- 贊助按鈕區 (Sidebar Bottom) ---
+    st.markdown("---")
+    st.markdown("### ☕ 贊助旺來")
+    st.caption("覺得好用嗎？歡迎小額贊助，支持伺服器運作！")
+    
+    if st.button("❤️ 點我贊助 (支持開發者)", use_container_width=True):
+        log_action("點擊贊助意願") 
+        st.balloons() 
+        st.success("謝謝您的支持，這代表程式真的好用，好意我心領了！😊")
+
+    with st.expander("📅 系統開發日誌"):
         st.write(f"**🕒 系統最後重啟時間:** {get_taiwan_time_str()}")
         st.markdown("---")
-        
-        st.markdown("""
-        ### **v6.1 Stability Patch**
-        **發布日期**: 2025-01-05
-        
-        #### **[CORE] 系統韌性與穩定性工程 (Resilience Engineering)**
-        * **Memory Optimization (OOM Fix)**: 解決了雲端容器因記憶體不足 (OOM) 導致的「白畫面 (White Screen)」問題。導入了 `gc.collect()` 垃圾回收機制，在每批次數據處理後強制釋放記憶體，確保系統長時間運行的穩定性。
-        * **Single-Threaded Fetching**: 將數據抓取引擎從多線程 (Multi-thread) 切換回單線程 (Single-thread) 模式，徹底根除因高併發導致的執行緒鎖死 (Thread Locking) 與資源耗盡問題。
-        * **Batch Size Optimization**: 配合單線程模式，將單次數據吞吐量 (Batch Size) 優化至 100，在維持系統穩定的前提下，最大化數據下載效率。
-
-        #### **[ARCH] 架構升級**
-        * **Multi-View Architecture**: 維持 v6.0 的多視圖並存架構，確保「即時篩選」、「週報戰情」與「歷史回測」數據流的獨立與整合。
-        * **Logic Synchronization**: 回測引擎與篩選引擎邏輯保持 100% 同步，確保歷史數據驗證的準確性。
-
-        #### **[SEC] 安全與權限**
-        * **Access Control**: 持續運作存取控制層 (ACL)，透過密碼鎖定機制保護系統資源，並整合社群導流功能。
-        """)
+        st.markdown("### Ver 6.2 Stability Fix\n* **Fix**: 修復個股趨勢圖因代號格式問題導致的崩潰 (IndexError)。\n* **UI**: 調整贊助按鈕位置，確保其始終可見。")
     
     st.divider()
     with st.expander("🔐 管理員後台"):
@@ -667,6 +624,8 @@ with st.sidebar:
             if os.path.exists(LOG_FILE):
                 st.markdown("### 🚦 流量統計")
                 log_df = pd.read_csv(LOG_FILE)
+                donate_clicks = len(log_df[log_df['頁面動作'] == "點擊贊助意願"])
+                st.metric("💰 累積贊助意願", donate_clicks)
                 st.dataframe(log_df.sort_values(by="時間", ascending=False), use_container_width=True)
                 with open(LOG_FILE, "rb") as f:
                     st.download_button("📥 下載 Log", f, file_name="traffic_log.csv", mime="text/csv")
@@ -716,9 +675,20 @@ if st.session_state['master_df'] is not None:
             st.markdown("### 🔍 個股趨勢圖")
             if len(df) > 0:
                 selected_stock_label = st.selectbox("請選擇一檔股票：", (df['代號'].astype(str) + " " + df['名稱']).tolist())
-                selected_code = selected_stock_label.split(" ")[0] 
-                full_code = df[df['代號'] == selected_code]['完整代號'].values[0]
-                plot_stock_chart(full_code, selected_stock_label.split(" ")[1])
+                # 6.2 修正：更安全的字串切割與查詢
+                try:
+                    selected_code = str(selected_stock_label).split(" ")[0]
+                    # 必須將代號欄位轉為字串才能正確比對
+                    df['代號_str'] = df['代號'].astype(str)
+                    full_code_series = df[df['代號_str'] == selected_code]['完整代號']
+                    if not full_code_series.empty:
+                        full_code = full_code_series.values[0]
+                        stock_name = selected_stock_label.split(" ")[1] if len(selected_stock_label.split(" ")) > 1 else selected_code
+                        plot_stock_chart(full_code, stock_name)
+                    else:
+                        st.error("找不到該股票代號，請重新整理。")
+                except Exception as e:
+                    st.error(f"發生錯誤：{e}")
 
 if st.session_state['weekly_report'] is not None:
     df_scan = st.session_state['weekly_report']
@@ -754,6 +724,7 @@ if st.session_state['backtest_result'] is not None:
     if len(df_history) > 0:
         total_count = len(df_history)
         win_df = df_history[df_history['結果'].str.contains("Win") | df_history['結果'].str.contains("驗證成功")]
+        win_count = len(win_df)
         win_rate = int((len(win_df) / total_count) * 100) if total_count > 0 else 0
         avg_max_ret = round(df_history['最高漲幅(%)'].mean(), 2)
         c1, c2, c3 = st.columns(3)
