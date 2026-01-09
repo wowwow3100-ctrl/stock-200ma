@@ -12,7 +12,7 @@ import csv
 import gc
 
 # --- 1. 網頁設定 ---
-VER = "v6.3 (High Performance)"
+VER = "v6.4 (Secrets Manager)"
 st.set_page_config(page_title=f"🍍 旺來-台股生命線({VER})", layout="wide")
 
 # ==========================================
@@ -41,7 +41,17 @@ if not st.session_state['auth_status']:
         pwd_input = st.text_input("Password", type="password", label_visibility="collapsed", placeholder="請輸入密碼...")
         
         if pwd_input:
-            if pwd_input == "2026888":
+            # --- 資安修正：改為讀取 st.secrets ---
+            try:
+                # 嘗試讀取後台設定的密碼
+                correct_pwd = st.secrets["system_password"]
+            except FileNotFoundError:
+                # 如果還沒設定 Secrets，暫時使用預設值防止崩潰 (請盡快去後台設定)
+                correct_pwd = "default_password_please_change"
+                st.error("⚠️ 系統警告：尚未設定 Secrets，目前處於不安全模式。")
+
+            # 比對密碼 (將輸入與設定值都轉為字串以防萬一)
+            if str(pwd_input) == str(correct_pwd):
                 st.session_state['auth_status'] = True
                 st.toast("✅ 驗證成功，歡迎回來！")
                 time.sleep(0.5)
@@ -152,7 +162,6 @@ def scan_period_signals(stock_dict, days_lookback, progress_bar, min_vol, bias_t
                         use_trend_up, use_trend_down, use_kd, use_vol_double, use_burst_vol):
     results = []
     all_tickers = list(stock_dict.keys())
-    # v6.3 調校：改回 50 並開啟多線程
     BATCH_SIZE = 50 
     total_batches = (len(all_tickers) // BATCH_SIZE) + 1
     
@@ -166,7 +175,6 @@ def scan_period_signals(stock_dict, days_lookback, progress_bar, min_vol, bias_t
     for i, batch_idx in enumerate(range(0, len(all_tickers), BATCH_SIZE)):
         batch = all_tickers[batch_idx : batch_idx + BATCH_SIZE]
         try:
-            # v6.3: threads=True (預設) 回歸極速
             data = yf.download(batch, period="9mo", interval="1d", progress=False, auto_adjust=False)
             if data.empty: continue
             try:
@@ -274,7 +282,6 @@ def run_strategy_backtest(stock_dict, progress_bar, use_trend_up, use_treasure, 
     for i, batch_idx in enumerate(range(0, len(all_tickers), BATCH_SIZE)):
         batch = all_tickers[batch_idx : batch_idx + BATCH_SIZE]
         try:
-            # v6.3: threads=True
             data = yf.download(batch, period="2y", interval="1d", progress=False, auto_adjust=False)
             if data is None or data.empty: continue
             try:
@@ -374,7 +381,6 @@ def run_strategy_backtest(stock_dict, progress_bar, use_trend_up, use_treasure, 
 def fetch_all_data(stock_dict, progress_bar, status_text):
     if not stock_dict: return pd.DataFrame()
     all_tickers = list(stock_dict.keys())
-    # v6.3 調校：改回 50 並開啟多線程
     BATCH_SIZE = 50 
     total_batches = (len(all_tickers) // BATCH_SIZE) + 1
     raw_data_list = []
@@ -382,7 +388,6 @@ def fetch_all_data(stock_dict, progress_bar, status_text):
     for i, batch_idx in enumerate(range(0, len(all_tickers), BATCH_SIZE)):
         batch = all_tickers[batch_idx : batch_idx + BATCH_SIZE]
         try:
-            # v6.3: threads=True (預設) 回歸極速
             data = yf.download(batch, period="1y", interval="1d", progress=False, auto_adjust=False)
             if not data.empty:
                 try:
@@ -621,10 +626,10 @@ with st.sidebar:
         st.write(f"**🕒 系統最後重啟時間:** {get_taiwan_time_str()}")
         st.markdown("---")
         st.markdown("""
-        ### Ver 6.3 (High Performance)
-        * **Speed**: 回歸多線程 (Multi-thread) 下載引擎，大幅縮短數據更新等待時間。
-        * **Opt**: 優化批次參數 (Batch=50) 與記憶體管理，在速度與穩定性間取得平衡。
-        * **Fix**: 修復個股趨勢圖因代號格式問題導致的錯誤。
+        ### Ver 6.4 (Secrets Manager)
+        * **Security**: 升級密碼管理機制，支援 Streamlit Secrets (st.secrets) 環境變數讀取，避免原始碼外洩密碼。
+        * **Fix**: 修復個股趨勢圖因代號格式問題導致的崩潰 (IndexError)。
+        * **UI**: 調整贊助按鈕與文字位置。
         """)
     
     st.divider()
@@ -639,10 +644,6 @@ with st.sidebar:
                 st.dataframe(log_df.sort_values(by="時間", ascending=False), use_container_width=True)
                 with open(LOG_FILE, "rb") as f:
                     st.download_button("📥 下載 Log", f, file_name="traffic_log.csv", mime="text/csv")
-            else:
-                st.info("尚無流量紀錄。")
-        elif admin_pwd:
-            st.error("密碼錯誤")
 
 # ==========================================
 # 4. 顯示邏輯
