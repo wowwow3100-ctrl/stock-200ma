@@ -16,10 +16,10 @@ try:
     os.environ['TZ'] = 'Asia/Taipei'
     time.tzset()
 except:
-    pass # 如果是 Windows 或不支援的環境則跳過
+    pass
 
 # --- 1. 網頁設定 ---
-VER = "v6.7 (TZ Fix & Strategy+)"
+VER = "v6.8 (UX Text Update)"
 st.set_page_config(page_title=f"🍍 旺來-台股生命線({VER})", layout="wide")
 
 # ==========================================
@@ -73,7 +73,6 @@ if not st.session_state['auth_status']:
 # ==========================================
 
 def get_taiwan_time():
-    # 雙重保險：即使系統時區沒設成功，這裡也會手動 +8
     utc_now = datetime.now(timezone.utc)
     tw_time = utc_now + timedelta(hours=8)
     return tw_time
@@ -158,7 +157,6 @@ def calculate_kd_values(df, n=9):
         return k_list[-1], d_list[-1]
     except: return 50, 50
 
-# v6.7 新增: MACD 計算函式
 def calculate_macd_values(df, fast=12, slow=26, signal=9):
     try:
         exp1 = df['Close'].ewm(span=fast, adjust=False).mean()
@@ -245,11 +243,10 @@ def scan_period_signals(stock_dict, days_lookback, progress_bar, min_vol, bias_t
                             open_p = o_series.iloc[day_idx]
                             if (vol <= vol_ma5_val * 1.5) or (close_p <= open_p): continue
                         
-                        # --- v6.7 新增過濾 ---
                         if filter_ma60_pressure:
                             if close_p < ma60_val: continue 
 
-                        sub_start = max(0, day_idx - 60)
+                        sub_start = max(0, day_idx - 60) 
                         sub_df = pd.DataFrame({'Close': c_series.iloc[sub_start:day_idx+1], 'High': h_series.iloc[sub_start:day_idx+1], 'Low': l_series.iloc[sub_start:day_idx+1]})
                         
                         if use_kd:
@@ -355,7 +352,6 @@ def run_strategy_backtest(stock_dict, progress_bar, use_trend_up, use_treasure, 
                         if use_burst_vol:
                             if vol <= (vol_ma5_val * 1.5) or close_p <= open_p: continue
                         
-                        # v6.7 回測同步濾網
                         if filter_ma60_pressure:
                             if close_p < ma60_val: continue
                         
@@ -387,7 +383,7 @@ def run_strategy_backtest(stock_dict, progress_bar, use_trend_up, use_treasure, 
                             if days_after_signal < 1: 
                                 is_watching = True
                             else:
-                                if days_after_signal < 10: # 未滿10天算觀察中
+                                if days_after_signal < 10:
                                     current_price = c_series.iloc[-1]
                                     final_profit_pct = (current_price - close_p) / close_p * 100
                                     is_watching = True
@@ -581,7 +577,7 @@ with st.sidebar:
             st.success(f"⚡ 已快速載入上次資料 ({st.session_state['last_update']})")
         except Exception as e: st.error(f"讀取快取失敗: {e}")
 
-    if st.button("🔄 下載最新股價 (開市用)", type="primary"):
+    if st.button("🔄 手動更新股價 (若有資料可略過)", type="primary", help="系統已自動載入舊資料。僅在資料過舊或想看盤中即時價時才需點擊。"):
         stock_dict = get_stock_list()
         if not stock_dict: st.error("無法取得股票清單")
         else:
@@ -676,7 +672,12 @@ with st.sidebar:
     with st.expander("📅 系統開發日誌"):
         st.write(f"**🕒 系統最後重啟時間:** {get_taiwan_time_str()}")
         st.markdown("---")
-        st.markdown("### Ver 6.7 (TZ Fix & Strategy+)\n* **Fix**: 強制校正系統時區為 UTC+8。\n* **Feature**: 新增「排除季線反壓」與「MACD 黃金交叉」濾網。\n* **Core**: 回測邏輯已同步支援新濾網。")
+        st.markdown("""
+        ### Ver 6.7 (TZ Fix & Strategy+)
+        * **Fix**: 強制校正系統時區為 UTC+8。
+        * **Feature**: 新增「排除季線反壓」與「MACD 黃金交叉」濾網。
+        * **Core**: 回測引擎已同步支援新指標。
+        """)
     
     st.divider()
     with st.expander("🔐 管理員後台"):
@@ -707,7 +708,7 @@ if st.session_state['master_df'] is None:
             <span style="font-size: 1.3em; color: #6a0dad; font-weight: bold;">預祝心想事成，從從容容，紫氣東來! 🟣✨</span><br>
             <span style="font-size: 0.9em; color: #888;">程式已達千行!越來越強大啦! 🚀</span></div>""", unsafe_allow_html=True)
         if os.path.exists("welcome.jpg"): st.image("welcome.jpg", width=180)
-    st.warning("👈 請先點擊左側 sidebar 的 **「🔄 下載最新股價」** 按鈕開始挖寶！")
+    st.warning("👈 請先點擊左側 sidebar 的 **「🔄 手動更新股價」** 按鈕開始挖寶！")
 
 if st.session_state['master_df'] is not None:
     df = st.session_state['master_df'].copy()
