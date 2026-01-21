@@ -19,7 +19,7 @@ except:
     pass
 
 # --- 1. 網頁設定 ---
-VER = "v6.9 (Hotfix: s_name)"
+VER = "v7.0 (KeyError Fix)"
 st.set_page_config(page_title=f"🍍 旺來-台股生命線({VER})", layout="wide")
 
 # ==========================================
@@ -186,7 +186,8 @@ def scan_period_signals(stock_dict, days_lookback, progress_bar, min_vol, bias_t
     for i, batch_idx in enumerate(range(0, len(all_tickers), BATCH_SIZE)):
         batch = all_tickers[batch_idx : batch_idx + BATCH_SIZE]
         try:
-            data = yf.download(batch, period="9mo", interval="1d", progress=False, auto_adjust=False, threads=4)
+            # v7.0 微調：threads=3 (更保險)
+            data = yf.download(batch, period="9mo", interval="1d", progress=False, auto_adjust=False, threads=3)
             if data.empty: continue
             try:
                 df_c = data['Close']; df_v = data['Volume']; df_l = data['Low']
@@ -305,7 +306,8 @@ def run_strategy_backtest(stock_dict, progress_bar, use_trend_up, use_treasure, 
     for i, batch_idx in enumerate(range(0, len(all_tickers), BATCH_SIZE)):
         batch = all_tickers[batch_idx : batch_idx + BATCH_SIZE]
         try:
-            data = yf.download(batch, period="2y", interval="1d", progress=False, auto_adjust=False, threads=4)
+            # v7.0: threads=3
+            data = yf.download(batch, period="2y", interval="1d", progress=False, auto_adjust=False, threads=3)
             if data is None or data.empty: continue
             try:
                 df_c = data['Close']; df_v = data['Volume']; df_l = data['Low']
@@ -416,14 +418,14 @@ def run_strategy_backtest(stock_dict, progress_bar, use_trend_up, use_treasure, 
 def fetch_all_data(stock_dict, progress_bar, status_text):
     if not stock_dict: return pd.DataFrame()
     all_tickers = list(stock_dict.keys())
-    BATCH_SIZE = 50 
+    BATCH_SIZE = 30 
     total_batches = (len(all_tickers) // BATCH_SIZE) + 1
     raw_data_list = []
 
     for i, batch_idx in enumerate(range(0, len(all_tickers), BATCH_SIZE)):
         batch = all_tickers[batch_idx : batch_idx + BATCH_SIZE]
         try:
-            data = yf.download(batch, period="1y", interval="1d", progress=False, auto_adjust=False, threads=4)
+            data = yf.download(batch, period="1y", interval="1d", progress=False, auto_adjust=False, threads=3)
             if not data.empty:
                 try:
                     df_c = data['Close']; df_h = data['High']; df_l = data['Low']
@@ -507,7 +509,7 @@ def fetch_all_data(stock_dict, progress_bar, status_text):
         del data; gc.collect()
         time.sleep(0.3)
         current_progress = (i + 1) / total_batches
-        progress_bar.progress(current_progress, text=f"努力挖掘中 (Batch=50)...({int(current_progress*100)}%)")
+        progress_bar.progress(current_progress, text=f"努力挖掘中 (Batch=30/Threads=3)...({int(current_progress*100)}%)")
     
     df_result = pd.DataFrame(raw_data_list)
     if not df_result.empty: df_result = df_result.drop_duplicates(subset=['完整代號']) 
@@ -585,8 +587,8 @@ with st.sidebar:
             with placeholder_emoji:
                 st.markdown("""<div style="text-align: center; font-size: 40px; animation: blink 1s infinite;">🎁💰✨</div>
                     <style>@keyframes blink { 0% { opacity: 1; } 50% { opacity: 0.5; } 100% { opacity: 1; } }</style>
-                    <div style="text-align: center;">連線下載中 (Batch=50)...</div>""", unsafe_allow_html=True)
-            st.caption("ℹ️ 已啟用穩定下載模式 (單線程/Batch 50)，請耐心等候...")
+                    <div style="text-align: center;">連線下載中 (Batch=30)...</div>""", unsafe_allow_html=True)
+            st.caption("ℹ️ 已啟用穩定下載模式 (單線程/Batch 30)，請耐心等候...")
             status_text = st.empty()
             progress_bar = st.progress(0, text="準備下載...")
             df = fetch_all_data(stock_dict, progress_bar, status_text)
@@ -672,7 +674,7 @@ with st.sidebar:
     with st.expander("📅 系統開發日誌"):
         st.write(f"**🕒 系統最後重啟時間:** {get_taiwan_time_str()}")
         st.markdown("---")
-        st.markdown("### Ver 6.9 (Hotfix: s_name)\n* **Fix**: 修復回測報告因變數遺失導致的崩潰問題。\n* **Feature**: 新增「排除季線反壓」與「MACD」濾網。\n* **UX**: 優化下載按鈕提示文字。")
+        st.markdown("### Ver 7.0 (KeyError Fix)\n* **Fix**: 修復「策略回測」因缺少日期字串欄位導致的崩潰問題 (KeyError: 訊號日期_str)。\n* **Stability**: 微調數據下載線程數 (Threads=3)，在速度與穩定間取得最佳平衡，防止雲端主機資源耗盡。")
     
     st.divider()
     with st.expander("🔐 管理員後台"):
@@ -766,12 +768,13 @@ if st.session_state['weekly_report'] is not None:
 if st.session_state['backtest_result'] is not None:
     bt_df = st.session_state['backtest_result']
     st.markdown("---")
-    
-    # 修正 NameError 的關鍵補丁
     s_name = "🔥 浴火重生" if strategy_mode == "🔥 浴火重生 (假跌破)" else "🛡️ 守護生命線"
-    
     st.subheader(f"🧪 策略回測報告：{s_name}")
+    
     bt_df['訊號日期'] = pd.to_datetime(bt_df['訊號日期'])
+    # === 關鍵修復：補回這行 ===
+    bt_df['訊號日期_str'] = bt_df['訊號日期'].dt.strftime('%Y-%m-%d')
+    # ==========================
     
     if not bt_df.empty:
         bt_df['週次'] = bt_df['訊號日期'] - pd.to_timedelta(bt_df['訊號日期'].dt.dayofweek, unit='d')
