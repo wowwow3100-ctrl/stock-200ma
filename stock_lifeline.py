@@ -12,7 +12,7 @@ import csv
 import gc
 
 # --- 1. 網頁設定 ---
-VER = "v6.5 (Thread Safe)"
+VER = "v6.6 (MA60 & MACD Filter)"
 st.set_page_config(page_title=f"🍍 旺來-台股生命線({VER})", layout="wide")
 
 # ==========================================
@@ -41,11 +41,10 @@ if not st.session_state['auth_status']:
         pwd_input = st.text_input("Password", type="password", label_visibility="collapsed", placeholder="請輸入密碼...")
         
         if pwd_input:
-            # 嘗試讀取 Secrets，若無則使用預設
             try:
                 correct_pwd = st.secrets["system_password"]
             except:
-                correct_pwd = "default_password" # 防止未設定 secrets 時崩潰
+                correct_pwd = "default_password"
 
             if str(pwd_input) == "2026888" or str(pwd_input) == str(correct_pwd):
                 st.session_state['auth_status'] = True
@@ -66,7 +65,6 @@ if not st.session_state['auth_status']:
 # (主程式開始)
 # ==========================================
 
-# --- 時間校正工具 (UTC+8) ---
 def get_taiwan_time():
     utc_now = datetime.now(timezone.utc)
     tw_time = utc_now + timedelta(hours=8)
@@ -75,7 +73,6 @@ def get_taiwan_time():
 def get_taiwan_time_str():
     return get_taiwan_time().strftime("%Y-%m-%d %H:%M:%S")
 
-# --- 流量紀錄 ---
 LOG_FILE = "traffic_log.csv"
 
 def get_remote_ip():
@@ -153,12 +150,24 @@ def calculate_kd_values(df, n=9):
         return k_list[-1], d_list[-1]
     except: return 50, 50
 
+# v6.6 新增: MACD 計算函式
+def calculate_macd_values(df, fast=12, slow=26, signal=9):
+    try:
+        exp1 = df['Close'].ewm(span=fast, adjust=False).mean()
+        exp2 = df['Close'].ewm(span=slow, adjust=False).mean()
+        macd = exp1 - exp2
+        signal_line = macd.ewm(span=signal, adjust=False).mean()
+        # 為了判斷交叉，回傳最後兩天的值
+        return macd.iloc[-1], signal_line.iloc[-1], macd.iloc[-2], signal_line.iloc[-2]
+    except:
+        return 0, 0, 0, 0
+
 # --- 週報掃描 ---
 def scan_period_signals(stock_dict, days_lookback, progress_bar, min_vol, bias_thresh, strategy_type, 
-                        use_trend_up, use_trend_down, use_kd, use_vol_double, use_burst_vol):
+                        use_trend_up, use_trend_down, use_kd, use_vol_double, use_burst_vol, 
+                        filter_ma60_pressure, filter_macd): # v6.6 新增參數
     results = []
     all_tickers = list(stock_dict.keys())
-    # v6.5 修正：降低批次 + 限制線程數 = 穩定防崩潰
     BATCH_SIZE = 30 
     total_batches = (len(all_tickers) // BATCH_SIZE) + 1
     
@@ -172,7 +181,6 @@ def scan_period_signals(stock_dict, days_lookback, progress_bar, min_vol, bias_t
     for i, batch_idx in enumerate(range(0, len(all_tickers), BATCH_SIZE)):
         batch = all_tickers[batch_idx : batch_idx + BATCH_SIZE]
         try:
-            # v6.5 關鍵：threads=4 (限制同時只有4個下載線程)，避免資源耗盡
             data = yf.download(batch, period="9mo", interval="1d", progress=False, auto_adjust=False, threads=4)
             if data.empty: continue
             try:
@@ -186,15 +194,18 @@ def scan_period_signals(stock_dict, days_lookback, progress_bar, min_vol, bias_t
                 df_o = df_o.to_frame(name=batch[0])
 
             ma200_df = df_c.rolling(window=200).mean()
+            ma60_df = df_c.rolling(window=60).mean() # v6.6 需要季線
             vol_ma5_df = df_v.rolling(window=5).mean()
             
             for ticker in df_c.columns:
                 try:
                     c_series = df_c[ticker].dropna()
                     if len(c_series) < 200: continue
-                    ma200_series = ma200_df[ticker]; v_series = df_v[ticker]
-                    l_series = df_l[ticker]; h_series = df_h[ticker]
-                    o_series = df_o[ticker]; vol_ma5_series = vol_ma5_df[ticker]
+                    ma200_series = ma200_df[ticker]; ma60_series = ma60_df[ticker]
+                    v_series = df_v[ticker]; l_series = df_l[ticker]
+                    h_series = df_h[ticker]; o_series = df_o[ticker]
+                    vol_ma5_series = vol_ma5_df[ticker]
+                    
                     stock_info = stock_dict.get(ticker, {})
                     name = stock_info.get('name', ticker)
                     industry = stock_info.get('group', '')
@@ -208,7 +219,8 @@ def scan_period_signals(stock_dict, days_lookback, progress_bar, min_vol, bias_t
                         ma200_val = ma200_series.iloc[day_idx]; vol = v_series.iloc[day_idx]
                         prev_vol = v_series.iloc[day_idx-1] if day_idx > 0 else 0
                         vol_ma5_val = vol_ma5_series.iloc[day_idx-1] if day_idx > 0 else 0
-                        
+                        ma60_val = ma60_series.iloc[day_idx]
+
                         if vol < (min_vol * 1000) or pd.isna(ma200_val) or ma200_val == 0: continue
                         is_signal = False
                         
@@ -225,11 +237,23 @@ def scan_period_signals(stock_dict, days_lookback, progress_bar, min_vol, bias_t
                         if use_burst_vol:
                             open_p = o_series.iloc[day_idx]
                             if (vol <= vol_ma5_val * 1.5) or (close_p <= open_p): continue
+                        
+                        # --- v6.6 新增過濾 ---
+                        if filter_ma60_pressure:
+                            if close_p < ma60_val: continue # 股價在季線下就剔除
+
+                        # 計算指標
+                        sub_start = max(0, day_idx - 60) # 拉長一點給MACD算
+                        sub_df = pd.DataFrame({'Close': c_series.iloc[sub_start:day_idx+1], 'High': h_series.iloc[sub_start:day_idx+1], 'Low': l_series.iloc[sub_start:day_idx+1]})
+                        
                         if use_kd:
-                            sub_start = max(0, day_idx - 30)
-                            sub_df = pd.DataFrame({'Close': c_series.iloc[sub_start:day_idx+1], 'High': h_series.iloc[sub_start:day_idx+1], 'Low': l_series.iloc[sub_start:day_idx+1]})
                             k_val, d_val = calculate_kd_values(sub_df)
                             if not (k_val > d_val): continue
+                        
+                        if filter_macd:
+                            macd, sig, macd_prev, sig_prev = calculate_macd_values(sub_df)
+                            # 黃金交叉: 今天 DIF > MACD 且 昨天 DIF < MACD
+                            if not (macd > sig and macd_prev <= sig_prev): continue
 
                         if strategy_type == "🛡️ 守護生命線 (反彈/支撐)":
                             bias = (close_p - ma200_val) / ma200_val * 100
@@ -270,18 +294,15 @@ def scan_period_signals(stock_dict, days_lookback, progress_bar, min_vol, bias_t
     return pd.DataFrame(results)
 
 # --- 長期回測 ---
-def run_strategy_backtest(stock_dict, progress_bar, use_trend_up, use_treasure, use_vol, min_vol_threshold, use_burst_vol):
+def run_strategy_backtest(stock_dict, progress_bar, use_trend_up, use_treasure, use_vol, min_vol_threshold, use_burst_vol, filter_ma60_pressure, filter_macd):
     results = []
     all_tickers = list(stock_dict.keys())
-    # v6.5 修正：降低批次 + 限制線程數
     BATCH_SIZE = 30 
     total_batches = (len(all_tickers) // BATCH_SIZE) + 1
-    OBSERVE_DAYS = 10 
     
     for i, batch_idx in enumerate(range(0, len(all_tickers), BATCH_SIZE)):
         batch = all_tickers[batch_idx : batch_idx + BATCH_SIZE]
         try:
-            # v6.5 關鍵：threads=4
             data = yf.download(batch, period="2y", interval="1d", progress=False, auto_adjust=False, threads=4)
             if data is None or data.empty: continue
             try:
@@ -295,6 +316,7 @@ def run_strategy_backtest(stock_dict, progress_bar, use_trend_up, use_treasure, 
                 df_o = df_o.to_frame(name=batch[0])
 
             ma200_df = df_c.rolling(window=200).mean()
+            ma60_df = df_c.rolling(window=60).mean() # v6.6
             vol_ma5_df = df_v.rolling(window=5).mean()
             scan_window = df_c.index[-120:]
             
@@ -302,7 +324,8 @@ def run_strategy_backtest(stock_dict, progress_bar, use_trend_up, use_treasure, 
                 try:
                     c_series = df_c[ticker]; v_series = df_v[ticker]; l_series = df_l[ticker]
                     h_series = df_h[ticker]; o_series = df_o[ticker]
-                    ma200_series = ma200_df[ticker]; vol_ma5_series = vol_ma5_df[ticker]
+                    ma200_series = ma200_df[ticker]; ma60_series = ma60_df[ticker]
+                    vol_ma5_series = vol_ma5_df[ticker]
                     stock_info = stock_dict.get(ticker, {}); stock_name = stock_info.get('name', ticker)
                     stock_industry = stock_info.get('group', '其他')
                     total_len = len(c_series)
@@ -315,7 +338,9 @@ def run_strategy_backtest(stock_dict, progress_bar, use_trend_up, use_treasure, 
 
                         close_p = c_series.iloc[idx]; open_p = o_series.iloc[idx]
                         vol = v_series.iloc[idx]; prev_vol = v_series.iloc[idx-1]
-                        ma200_val = ma200_series.iloc[idx]; vol_ma5_val = vol_ma5_series.iloc[idx-1] 
+                        ma200_val = ma200_series.iloc[idx]; ma60_val = ma60_series.iloc[idx]
+                        vol_ma5_val = vol_ma5_series.iloc[idx-1] 
+                        
                         if vol < (min_vol_threshold * 1000): continue
                         if ma200_val == 0 or prev_vol == 0: continue
 
@@ -325,6 +350,16 @@ def run_strategy_backtest(stock_dict, progress_bar, use_trend_up, use_treasure, 
                         if use_vol and (vol <= prev_vol * 1.5): continue
                         if use_burst_vol:
                             if vol <= (vol_ma5_val * 1.5) or close_p <= open_p: continue
+                        
+                        # v6.6 新增回測條件
+                        if filter_ma60_pressure:
+                            if close_p < ma60_val: continue
+                        
+                        if filter_macd:
+                            sub_start = max(0, idx - 60)
+                            sub_df = pd.DataFrame({'Close': c_series.iloc[sub_start:idx+1]})
+                            macd, sig, macd_prev, sig_prev = calculate_macd_values(sub_df)
+                            if not (macd > sig and macd_prev <= sig_prev): continue
 
                         if use_treasure:
                             start_idx = idx - 7
@@ -348,17 +383,12 @@ def run_strategy_backtest(stock_dict, progress_bar, use_trend_up, use_treasure, 
                             if days_after_signal < 1: 
                                 is_watching = True
                             else:
-                                if days_after_signal < OBSERVE_DAYS:
-                                    current_price = c_series.iloc[-1]
-                                    final_profit_pct = (current_price - close_p) / close_p * 100
-                                    is_watching = True
-                                else:
-                                    future_highs = h_series.iloc[idx+1 : idx+1+OBSERVE_DAYS]
-                                    max_price = future_highs.max()
-                                    final_profit_pct = (max_price - close_p) / close_p * 100
-                                    if final_profit_pct > 3.0: result_status = "驗證成功 🏆"
-                                    elif final_profit_pct > 0: result_status = "Win (反彈)"
-                                    else: result_status = "Loss 📉"
+                                future_highs = h_series.iloc[idx+1 : idx+1+10]
+                                max_price = future_highs.max()
+                                final_profit_pct = (max_price - close_p) / close_p * 100
+                                if final_profit_pct > 3.0: result_status = "驗證成功 🏆"
+                                elif final_profit_pct > 0: result_status = "Win (反彈)"
+                                else: result_status = "Loss 📉"
 
                             results.append({
                                 '訊號日期': date, '月份': '👀 關注中' if is_watching else month_str,
@@ -381,15 +411,13 @@ def run_strategy_backtest(stock_dict, progress_bar, use_trend_up, use_treasure, 
 def fetch_all_data(stock_dict, progress_bar, status_text):
     if not stock_dict: return pd.DataFrame()
     all_tickers = list(stock_dict.keys())
-    # v6.5 修正：降低批次
-    BATCH_SIZE = 30 
+    BATCH_SIZE = 50 
     total_batches = (len(all_tickers) // BATCH_SIZE) + 1
     raw_data_list = []
 
     for i, batch_idx in enumerate(range(0, len(all_tickers), BATCH_SIZE)):
         batch = all_tickers[batch_idx : batch_idx + BATCH_SIZE]
         try:
-            # v6.5 關鍵：threads=4 (限制為4個線程)
             data = yf.download(batch, period="1y", interval="1d", progress=False, auto_adjust=False, threads=4)
             if not data.empty:
                 try:
@@ -447,7 +475,10 @@ def fetch_all_data(stock_dict, progress_bar, status_text):
 
                         stock_df = pd.DataFrame({'Close': df_c[ticker], 'High': df_h[ticker], 'Low': df_l[ticker]}).dropna()
                         k_val, d_val = 0.0, 0.0
+                        macd, sig, _, _ = 0, 0, 0, 0
+                        
                         if len(stock_df) >= 9: k_val, d_val = calculate_kd_values(stock_df)
+                        if len(stock_df) >= 26: macd, sig, _, _ = calculate_macd_values(stock_df)
 
                         bias = ((price - ma200) / ma200) * 100
                         stock_info = stock_dict.get(ticker)
@@ -461,6 +492,7 @@ def fetch_all_data(stock_dict, progress_bar, status_text):
                             '乖離率(%)': float(bias), 'abs_bias': abs(float(bias)),
                             '成交量': int(vol), '昨日成交量': int(prev_vol),
                             'K值': float(k_val), 'D值': float(d_val),
+                            'MACD': float(macd), 'MACD_SIG': float(sig),
                             '位置': "🟢生命線上" if price >= ma200 else "🔴生命線下",
                             '浴火重生': is_treasure, '爆量起漲': is_burst, '站上天數': int(streak_days)
                         })
@@ -470,7 +502,7 @@ def fetch_all_data(stock_dict, progress_bar, status_text):
         del data; gc.collect()
         time.sleep(0.3)
         current_progress = (i + 1) / total_batches
-        progress_bar.progress(current_progress, text=f"努力挖掘中 (Batch=30/Threads=4)...({int(current_progress*100)}%)")
+        progress_bar.progress(current_progress, text=f"努力挖掘中 (Batch=50)...({int(current_progress*100)}%)")
     
     df_result = pd.DataFrame(raw_data_list)
     if not df_result.empty: df_result = df_result.drop_duplicates(subset=['完整代號']) 
@@ -548,8 +580,8 @@ with st.sidebar:
             with placeholder_emoji:
                 st.markdown("""<div style="text-align: center; font-size: 40px; animation: blink 1s infinite;">🎁💰✨</div>
                     <style>@keyframes blink { 0% { opacity: 1; } 50% { opacity: 0.5; } 100% { opacity: 1; } }</style>
-                    <div style="text-align: center;">連線下載中 (Batch=30)...</div>""", unsafe_allow_html=True)
-            st.caption("ℹ️ 已啟用防崩潰下載 (Batch=30/Threads=4)，請耐心等候...")
+                    <div style="text-align: center;">連線下載中 (Batch=50)...</div>""", unsafe_allow_html=True)
+            st.caption("ℹ️ 已啟用穩定下載模式 (單線程/Batch 50)，請耐心等候...")
             status_text = st.empty()
             progress_bar = st.progress(0, text="準備下載...")
             df = fetch_all_data(stock_dict, progress_bar, status_text)
@@ -578,6 +610,12 @@ with st.sidebar:
     filter_kd = st.checkbox("KD 黃金交叉 (今日 K > D)", value=False)
     filter_vol_double = st.checkbox("出量 (今日 > 昨日x1.5)", value=False)
     st.markdown("---")
+    
+    st.caption("🚀 進階濾網 (提高勝率)：")
+    filter_ma60_pressure = st.checkbox("🛡️ 排除季線反壓 (股價需 > 60MA)", value=False, help="避開頭上有季線壓力的股票")
+    filter_macd = st.checkbox("🌊 MACD 黃金交叉 (趨勢轉強)", value=False, help="DIF 向上突破 MACD Signal")
+    
+    st.markdown("---")
     st.caption("🧪 實驗室 (測試中 - 模擬法人起漲)：")
     filter_burst_vol = st.checkbox("🔥 爆量起漲 (量>5日均量1.5倍 + 紅K)", value=False)
 
@@ -600,13 +638,15 @@ with st.sidebar:
                 bt_df = run_strategy_backtest(
                     stock_dict, bt_progress, use_trend_up=filter_trend_up, 
                     use_treasure=use_treasure_param, use_vol=filter_vol_double,
-                    min_vol_threshold=min_vol_input, use_burst_vol=filter_burst_vol
+                    min_vol_threshold=min_vol_input, use_burst_vol=filter_burst_vol,
+                    filter_ma60_pressure=filter_ma60_pressure, filter_macd=filter_macd
                 )
                 
                 scan_progress = st.progress(0, text="正在編制週報...")
                 df_scan = scan_period_signals(
                     stock_dict, 5, scan_progress, min_vol_input, bias_threshold, strategy_mode,
-                    filter_trend_up, filter_trend_down, filter_kd, filter_vol_double, filter_burst_vol
+                    filter_trend_up, filter_trend_down, filter_kd, filter_vol_double, filter_burst_vol,
+                    filter_ma60_pressure, filter_macd
                 )
                 
                 st.session_state['backtest_result'] = bt_df
@@ -627,7 +667,7 @@ with st.sidebar:
     with st.expander("📅 系統開發日誌"):
         st.write(f"**🕒 系統最後重啟時間:** {get_taiwan_time_str()}")
         st.markdown("---")
-        st.markdown("### Ver 6.5 (Thread Safe)\n* **Fix**: 修正資料下載崩潰問題 (RuntimeError)，優化線程管理。\n* **Core**: 調整下載批次與線程數，確保雲端環境穩定運行。")
+        st.markdown("### Ver 6.6 (MA60 & MACD Filter)\n* **Filter**: 新增「排除季線反壓」與「MACD 黃金交叉」進階篩選。\n* **Algo**: 回測引擎已同步支援新指標。")
     
     st.divider()
     with st.expander("🔐 管理員後台"):
@@ -641,6 +681,10 @@ with st.sidebar:
                 st.dataframe(log_df.sort_values(by="時間", ascending=False), use_container_width=True)
                 with open(LOG_FILE, "rb") as f:
                     st.download_button("📥 下載 Log", f, file_name="traffic_log.csv", mime="text/csv")
+            else:
+                st.info("尚無流量紀錄。")
+        elif admin_pwd:
+            st.error("密碼錯誤")
 
 # ==========================================
 # 4. 顯示邏輯
@@ -667,7 +711,13 @@ if st.session_state['master_df'] is not None:
         if filter_kd: df = df[df['K值'] > df['D值']]
     if filter_vol_double: df = df[df['成交量'] > (df['昨日成交量'] * 1.5)]
     if filter_burst_vol: df = df[df['爆量起漲'] == True]
-        
+    
+    # v6.6 濾網應用
+    if filter_ma60_pressure: 
+        if 'MA60' in df.columns: df = df[df['收盤價'] > df['MA60']]
+    if filter_macd:
+        if 'MACD' in df.columns: df = df[(df['MACD'] > df['MACD_SIG'])] # 簡單判斷多頭排列
+
     if len(df) == 0: st.warning(f"⚠️ 找不到符合條件的股票！")
     else:
         st.markdown(f"""<div style="background-color: #f0f2f6; padding: 15px; border-radius: 10px; text-align: center; border: 2px solid #ff4b4b;">
