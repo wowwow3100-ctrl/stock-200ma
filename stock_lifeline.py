@@ -11,7 +11,7 @@ import uuid
 import csv
 import gc
 
-# --- 0. 強制設定系統時區 (嘗試校正後台 Log) ---
+# --- 0. 強制設定系統時區 ---
 try:
     os.environ['TZ'] = 'Asia/Taipei'
     time.tzset()
@@ -19,7 +19,7 @@ except:
     pass
 
 # --- 1. 網頁設定 ---
-VER = "v6.8 (UX Text Update)"
+VER = "v6.9 (Hotfix: s_name)"
 st.set_page_config(page_title=f"🍍 旺來-台股生命線({VER})", layout="wide")
 
 # ==========================================
@@ -672,12 +672,7 @@ with st.sidebar:
     with st.expander("📅 系統開發日誌"):
         st.write(f"**🕒 系統最後重啟時間:** {get_taiwan_time_str()}")
         st.markdown("---")
-        st.markdown("""
-        ### Ver 6.7 (TZ Fix & Strategy+)
-        * **Fix**: 強制校正系統時區為 UTC+8。
-        * **Feature**: 新增「排除季線反壓」與「MACD 黃金交叉」濾網。
-        * **Core**: 回測引擎已同步支援新指標。
-        """)
+        st.markdown("### Ver 6.9 (Hotfix: s_name)\n* **Fix**: 修復回測報告因變數遺失導致的崩潰問題。\n* **Feature**: 新增「排除季線反壓」與「MACD」濾網。\n* **UX**: 優化下載按鈕提示文字。")
     
     st.divider()
     with st.expander("🔐 管理員後台"):
@@ -770,7 +765,12 @@ if st.session_state['weekly_report'] is not None:
 
 if st.session_state['backtest_result'] is not None:
     bt_df = st.session_state['backtest_result']
-    st.markdown("---"); st.subheader(f"🧪 策略回測報告：{s_name}")
+    st.markdown("---")
+    
+    # 修正 NameError 的關鍵補丁
+    s_name = "🔥 浴火重生" if strategy_mode == "🔥 浴火重生 (假跌破)" else "🛡️ 守護生命線"
+    
+    st.subheader(f"🧪 策略回測報告：{s_name}")
     bt_df['訊號日期'] = pd.to_datetime(bt_df['訊號日期'])
     
     if not bt_df.empty:
