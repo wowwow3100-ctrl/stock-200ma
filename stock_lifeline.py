@@ -11,8 +11,15 @@ import uuid
 import csv
 import gc
 
+# --- 0. 強制設定系統時區 (嘗試校正後台 Log) ---
+try:
+    os.environ['TZ'] = 'Asia/Taipei'
+    time.tzset()
+except:
+    pass # 如果是 Windows 或不支援的環境則跳過
+
 # --- 1. 網頁設定 ---
-VER = "v6.6 (MA60 & MACD Filter)"
+VER = "v6.7 (TZ Fix & Strategy+)"
 st.set_page_config(page_title=f"🍍 旺來-台股生命線({VER})", layout="wide")
 
 # ==========================================
@@ -66,6 +73,7 @@ if not st.session_state['auth_status']:
 # ==========================================
 
 def get_taiwan_time():
+    # 雙重保險：即使系統時區沒設成功，這裡也會手動 +8
     utc_now = datetime.now(timezone.utc)
     tw_time = utc_now + timedelta(hours=8)
     return tw_time
@@ -150,14 +158,13 @@ def calculate_kd_values(df, n=9):
         return k_list[-1], d_list[-1]
     except: return 50, 50
 
-# v6.6 新增: MACD 計算函式
+# v6.7 新增: MACD 計算函式
 def calculate_macd_values(df, fast=12, slow=26, signal=9):
     try:
         exp1 = df['Close'].ewm(span=fast, adjust=False).mean()
         exp2 = df['Close'].ewm(span=slow, adjust=False).mean()
         macd = exp1 - exp2
         signal_line = macd.ewm(span=signal, adjust=False).mean()
-        # 為了判斷交叉，回傳最後兩天的值
         return macd.iloc[-1], signal_line.iloc[-1], macd.iloc[-2], signal_line.iloc[-2]
     except:
         return 0, 0, 0, 0
@@ -165,7 +172,7 @@ def calculate_macd_values(df, fast=12, slow=26, signal=9):
 # --- 週報掃描 ---
 def scan_period_signals(stock_dict, days_lookback, progress_bar, min_vol, bias_thresh, strategy_type, 
                         use_trend_up, use_trend_down, use_kd, use_vol_double, use_burst_vol, 
-                        filter_ma60_pressure, filter_macd): # v6.6 新增參數
+                        filter_ma60_pressure, filter_macd):
     results = []
     all_tickers = list(stock_dict.keys())
     BATCH_SIZE = 30 
@@ -194,7 +201,7 @@ def scan_period_signals(stock_dict, days_lookback, progress_bar, min_vol, bias_t
                 df_o = df_o.to_frame(name=batch[0])
 
             ma200_df = df_c.rolling(window=200).mean()
-            ma60_df = df_c.rolling(window=60).mean() # v6.6 需要季線
+            ma60_df = df_c.rolling(window=60).mean() 
             vol_ma5_df = df_v.rolling(window=5).mean()
             
             for ticker in df_c.columns:
@@ -238,12 +245,11 @@ def scan_period_signals(stock_dict, days_lookback, progress_bar, min_vol, bias_t
                             open_p = o_series.iloc[day_idx]
                             if (vol <= vol_ma5_val * 1.5) or (close_p <= open_p): continue
                         
-                        # --- v6.6 新增過濾 ---
+                        # --- v6.7 新增過濾 ---
                         if filter_ma60_pressure:
-                            if close_p < ma60_val: continue # 股價在季線下就剔除
+                            if close_p < ma60_val: continue 
 
-                        # 計算指標
-                        sub_start = max(0, day_idx - 60) # 拉長一點給MACD算
+                        sub_start = max(0, day_idx - 60)
                         sub_df = pd.DataFrame({'Close': c_series.iloc[sub_start:day_idx+1], 'High': h_series.iloc[sub_start:day_idx+1], 'Low': l_series.iloc[sub_start:day_idx+1]})
                         
                         if use_kd:
@@ -252,7 +258,6 @@ def scan_period_signals(stock_dict, days_lookback, progress_bar, min_vol, bias_t
                         
                         if filter_macd:
                             macd, sig, macd_prev, sig_prev = calculate_macd_values(sub_df)
-                            # 黃金交叉: 今天 DIF > MACD 且 昨天 DIF < MACD
                             if not (macd > sig and macd_prev <= sig_prev): continue
 
                         if strategy_type == "🛡️ 守護生命線 (反彈/支撐)":
@@ -316,7 +321,7 @@ def run_strategy_backtest(stock_dict, progress_bar, use_trend_up, use_treasure, 
                 df_o = df_o.to_frame(name=batch[0])
 
             ma200_df = df_c.rolling(window=200).mean()
-            ma60_df = df_c.rolling(window=60).mean() # v6.6
+            ma60_df = df_c.rolling(window=60).mean()
             vol_ma5_df = df_v.rolling(window=5).mean()
             scan_window = df_c.index[-120:]
             
@@ -328,7 +333,6 @@ def run_strategy_backtest(stock_dict, progress_bar, use_trend_up, use_treasure, 
                     vol_ma5_series = vol_ma5_df[ticker]
                     stock_info = stock_dict.get(ticker, {}); stock_name = stock_info.get('name', ticker)
                     stock_industry = stock_info.get('group', '其他')
-                    total_len = len(c_series)
 
                     for date in scan_window:
                         if pd.isna(ma200_series.get(date)): continue
@@ -351,7 +355,7 @@ def run_strategy_backtest(stock_dict, progress_bar, use_trend_up, use_treasure, 
                         if use_burst_vol:
                             if vol <= (vol_ma5_val * 1.5) or close_p <= open_p: continue
                         
-                        # v6.6 新增回測條件
+                        # v6.7 回測同步濾網
                         if filter_ma60_pressure:
                             if close_p < ma60_val: continue
                         
@@ -376,19 +380,24 @@ def run_strategy_backtest(stock_dict, progress_bar, use_trend_up, use_treasure, 
                         
                         if is_match:
                             month_str = date.strftime('%m月')
-                            days_after_signal = total_len - 1 - idx
+                            days_after_signal = len(c_series) - 1 - idx
                             final_profit_pct = 0.0
                             result_status = "觀察中"; is_watching = False
 
                             if days_after_signal < 1: 
                                 is_watching = True
                             else:
-                                future_highs = h_series.iloc[idx+1 : idx+1+10]
-                                max_price = future_highs.max()
-                                final_profit_pct = (max_price - close_p) / close_p * 100
-                                if final_profit_pct > 3.0: result_status = "驗證成功 🏆"
-                                elif final_profit_pct > 0: result_status = "Win (反彈)"
-                                else: result_status = "Loss 📉"
+                                if days_after_signal < 10: # 未滿10天算觀察中
+                                    current_price = c_series.iloc[-1]
+                                    final_profit_pct = (current_price - close_p) / close_p * 100
+                                    is_watching = True
+                                else:
+                                    future_highs = h_series.iloc[idx+1 : idx+1+10]
+                                    max_price = future_highs.max()
+                                    final_profit_pct = (max_price - close_p) / close_p * 100
+                                    if final_profit_pct > 3.0: result_status = "驗證成功 🏆"
+                                    elif final_profit_pct > 0: result_status = "Win (反彈)"
+                                    else: result_status = "Loss 📉"
 
                             results.append({
                                 '訊號日期': date, '月份': '👀 關注中' if is_watching else month_str,
@@ -667,7 +676,7 @@ with st.sidebar:
     with st.expander("📅 系統開發日誌"):
         st.write(f"**🕒 系統最後重啟時間:** {get_taiwan_time_str()}")
         st.markdown("---")
-        st.markdown("### Ver 6.6 (MA60 & MACD Filter)\n* **Filter**: 新增「排除季線反壓」與「MACD 黃金交叉」進階篩選。\n* **Algo**: 回測引擎已同步支援新指標。")
+        st.markdown("### Ver 6.7 (TZ Fix & Strategy+)\n* **Fix**: 強制校正系統時區為 UTC+8。\n* **Feature**: 新增「排除季線反壓」與「MACD 黃金交叉」濾網。\n* **Core**: 回測邏輯已同步支援新濾網。")
     
     st.divider()
     with st.expander("🔐 管理員後台"):
@@ -712,11 +721,11 @@ if st.session_state['master_df'] is not None:
     if filter_vol_double: df = df[df['成交量'] > (df['昨日成交量'] * 1.5)]
     if filter_burst_vol: df = df[df['爆量起漲'] == True]
     
-    # v6.6 濾網應用
+    # v6.7 濾網應用
     if filter_ma60_pressure: 
         if 'MA60' in df.columns: df = df[df['收盤價'] > df['MA60']]
     if filter_macd:
-        if 'MACD' in df.columns: df = df[(df['MACD'] > df['MACD_SIG'])] # 簡單判斷多頭排列
+        if 'MACD' in df.columns: df = df[(df['MACD'] > df['MACD_SIG'])]
 
     if len(df) == 0: st.warning(f"⚠️ 找不到符合條件的股票！")
     else:
